@@ -1,4 +1,4 @@
-# YT-DLP 下载器
+# YT-DLP-GUI
 
 这是一个基于yt-dlp的图形界面下载工具，可以方便地下载YouTube视频。
 
