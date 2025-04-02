@@ -3,7 +3,10 @@
 没有控制台窗口
 带有自定义图标
 单独的可执行文件：
-pyinstaller -F -w -i 002.ico yt_dlp_gui.py
+pyinstaller -F -w -i 003.ico yt_dlp_gui.py
+
+使用PyInstaller打包时，请使用以下命令确保DLL目录被正确包含（全部嵌入单文件，运行时释放到临时目录，我觉得不算好的方法）：
+pyinstaller --add-data "dll;dll" --add-data "icons;icons" --onefile yt_dlp_gui.py
 
 --------------------------------------------------------------------------------------------------------------------------------------
 要将 Python 脚本（`.py` 文件）编译成可执行的 `.exe` 文件，你可以使用一些工具，如 PyInstaller、cx_Freeze 或 Nuitka。以下是如何使用这些工具的详细步骤：

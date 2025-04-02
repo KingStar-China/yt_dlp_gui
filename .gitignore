@@ -20,19 +20,10 @@ wheels/
 .installed.cfg
 *.egg
 
-# Logs
-logs/
-*.log
-
-# IDE
-.idea/
-.vscode/
-*.swp
-*.swo
-
-# Project specific
+# 项目特定文件
+YouTube-Cookies.txt
+*.mp4
 dll/
 *.exe
 二舅下载的视频/
 鲜艺AI抠图结果/
-YouTube-Cookies.txt

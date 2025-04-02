@@ -4,10 +4,13 @@ import re
 import time
 import traceback
 import subprocess
+import ctypes
+
+# 导入Qt相关模块
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QLabel, QLineEdit, QPushButton,
                              QProgressBar, QComboBox, QFileDialog, QMessageBox, QMenu)
-from PyQt6.QtGui import QAction
+from PyQt6.QtGui import QAction, QIcon
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 
 class SniffThread(QThread):
@@ -128,11 +131,59 @@ class DownloadThread(QThread):
     def stop(self):
         self.is_running = False
 
+# 在顶部导入部分添加 QIcon
+from PyQt6.QtGui import QAction, QIcon
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle('yt_dlp_gui')
+        self.setWindowIcon(QIcon('icons/favicon.ico'))  # 修改图标路径
         self.setMinimumSize(533, 400)
+        # 在Windows 10/11上设置深色标题栏
+        # 导入必要的模块
+        import ctypes
+        from ctypes import windll, c_int, byref, sizeof
+        
+        # 设置窗口属性
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        
+        # 使用Windows 11的深色标题栏API
+        try:
+            # DWMWA_USE_IMMERSIVE_DARK_MODE = 20 用于Windows 10/11
+            # DWMWA_CAPTION_COLOR = 35 用于Windows 11 22H2及以上版本
+            DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+            DWMWA_CAPTION_COLOR = 35
+            
+            # 获取窗口句柄
+            hwnd = int(self.winId())
+            
+            # 设置深色模式
+            dark_mode_value = c_int(2)  # 2表示启用深色模式
+            windll.dwmapi.DwmSetWindowAttribute(
+                hwnd, 
+                DWMWA_USE_IMMERSIVE_DARK_MODE, 
+                byref(dark_mode_value), 
+                sizeof(dark_mode_value)
+            )
+            
+            # 尝试设置标题栏颜色（仅适用于Windows 11 22H2及以上版本）
+            try:
+                # 设置标题栏颜色为深灰色 (#2b2b2b)
+                # 颜色格式为ABGR，其中A为透明度
+                caption_color = c_int(0xFF2B2B2B)  # 完全不透明的深灰色
+                windll.dwmapi.DwmSetWindowAttribute(
+                    hwnd, 
+                    DWMWA_CAPTION_COLOR, 
+                    byref(caption_color), 
+                    sizeof(caption_color)
+                )
+            except Exception:
+                # 如果设置标题栏颜色失败，可能是因为系统版本不支持
+                pass
+        except Exception as e:
+            # 如果设置深色标题栏失败，记录错误但不影响程序运行
+            pass
         self.download_thread = None
         self.sniff_thread = None
         self.cookie_file = 'YouTube-Cookies.txt'
@@ -151,6 +202,7 @@ class MainWindow(QMainWindow):
         url_label = QLabel('视频URL：')
         url_label.setFixedWidth(60)  # 固定标签宽度
         self.url_input = QLineEdit()
+        self.url_input.setPlaceholderText('目录链接批量下载失败别怕，再次点击会继续下载未完成视频。')
         self.url_input.textChanged.connect(self.check_youtube_url)
         self.url_input.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.url_input.customContextMenuRequested.connect(self.show_context_menu)
@@ -306,7 +358,81 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, '错误', message)
 
     def show_about(self):
-        QMessageBox.about(self, '关于', '基于yt-dlp的视频下载工具\n为了兼容我只允许它下载H.264\n主要下载YouTube和bilibili视频\n\n作者：@少昊金天氏\n\n版本：0.0.1\n\n更新时间：2025-03-31')
+        # 创建自定义的关于对话框
+        about_box = QMessageBox(self)
+        about_box.setWindowTitle('关于')
+        about_box.setText('基于yt-dlp的视频下载工具\n为了兼容我只允许它下载H.264\n主要下载YouTube和bilibili视频\n\n作者：@少昊金天氏\n\n版本：v1.0.0\n\n更新时间：2025-03-31')
+        about_box.setIcon(QMessageBox.Icon.Information)
+        
+        # 设置对话框的深色标题栏
+        try:
+            # 导入必要的模块
+            from ctypes import windll, c_int, byref, sizeof
+            
+            # 设置窗口属性
+            about_box.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+            
+            # 等待对话框创建完成并获取窗口句柄
+            about_box.show()
+            hwnd = int(about_box.winId())
+            
+            # 设置深色模式
+            DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+            dark_mode_value = c_int(2)  # 2表示启用深色模式
+            windll.dwmapi.DwmSetWindowAttribute(
+                hwnd, 
+                DWMWA_USE_IMMERSIVE_DARK_MODE, 
+                byref(dark_mode_value), 
+                sizeof(dark_mode_value)
+            )
+            
+            # 尝试设置标题栏颜色（仅适用于Windows 11 22H2及以上版本）
+            try:
+                # 设置标题栏颜色为深灰色 (#2b2b2b)
+                DWMWA_CAPTION_COLOR = 35
+                caption_color = c_int(0xFF2B2B2B)  # 完全不透明的深灰色
+                windll.dwmapi.DwmSetWindowAttribute(
+                    hwnd, 
+                    DWMWA_CAPTION_COLOR, 
+                    byref(caption_color), 
+                    sizeof(caption_color)
+                )
+            except Exception:
+                # 如果设置标题栏颜色失败，可能是因为系统版本不支持
+                pass
+                
+            # 隐藏对话框，稍后再显示（这样可以确保样式应用）
+            about_box.hide()
+        except Exception as e:
+            # 如果设置深色标题栏失败，记录错误但不影响程序运行
+            print(f"设置关于对话框深色标题栏失败: {e}")
+        
+        # 设置对话框的样式表，使其与主窗口风格一致
+        about_box.setStyleSheet("""
+            QMessageBox {
+                background-color: #2D2D2D;
+                color: white;
+            }
+            QLabel {
+                color: white;
+            }
+            QPushButton {
+                background-color: #3D3D3D;
+                color: white;
+                border: 1px solid #555555;
+                padding: 5px;
+                border-radius: 2px;
+            }
+            QPushButton:hover {
+                background-color: #4D4D4D;
+            }
+            QPushButton:pressed {
+                background-color: #5D5D5D;
+            }
+        """)
+        
+        # 显示对话框并等待用户关闭
+        about_box.exec()
 
     def check_youtube_url(self):
         url = self.url_input.text().strip()
@@ -384,27 +510,131 @@ class MainWindow(QMainWindow):
                 event.ignore()
 
 def main():
-    # 创建日志目录
-    log_dir = 'logs'
-    os.makedirs(log_dir, exist_ok=True)
-    log_file = os.path.join(log_dir, f'app_{time.strftime("%Y%m%d_%H%M%S")}.log')
-    
-    def log_message(level, msg, exc_info=None):
-        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-        try:
-            with open(log_file, 'a', encoding='utf-8') as f:
-                f.write(f"[{timestamp}] {level}: {msg}\n")
-                if exc_info:
-                    f.write(f"[{timestamp}] TRACEBACK:\n{exc_info}\n")
-        except Exception as e:
-            print(f"写入日志失败：{e}")
-    
     try:
-        # 记录程序启动信息
-        log_message('INFO', '程序启动')
         
         # 首先初始化QApplication，确保在使用任何Qt组件前完成初始化
         app = QApplication(sys.argv)
+        app.setWindowIcon(QIcon('icons/favicon.ico'))  # 修改应用程序图标路径
+        
+        # 设置深色主题样式
+        from PyQt6.QtGui import QPalette
+        app.setStyle('Fusion')
+        dark_palette = QPalette()
+        dark_palette.setColor(QPalette.ColorRole.Window, Qt.GlobalColor.darkGray)
+        dark_palette.setColor(QPalette.ColorRole.WindowText, Qt.GlobalColor.white)
+        dark_palette.setColor(QPalette.ColorRole.Base, Qt.GlobalColor.darkGray)
+        dark_palette.setColor(QPalette.ColorRole.AlternateBase, Qt.GlobalColor.darkGray)
+        dark_palette.setColor(QPalette.ColorRole.ToolTipBase, Qt.GlobalColor.darkGray)
+        dark_palette.setColor(QPalette.ColorRole.ToolTipText, Qt.GlobalColor.white)
+        dark_palette.setColor(QPalette.ColorRole.Text, Qt.GlobalColor.white)
+        dark_palette.setColor(QPalette.ColorRole.Button, Qt.GlobalColor.darkGray)
+        dark_palette.setColor(QPalette.ColorRole.ButtonText, Qt.GlobalColor.white)
+        dark_palette.setColor(QPalette.ColorRole.BrightText, Qt.GlobalColor.red)
+        dark_palette.setColor(QPalette.ColorRole.Link, Qt.GlobalColor.cyan)
+        dark_palette.setColor(QPalette.ColorRole.Highlight, Qt.GlobalColor.cyan)
+        dark_palette.setColor(QPalette.ColorRole.HighlightedText, Qt.GlobalColor.black)
+        app.setPalette(dark_palette)
+        
+        # 设置深色主题样式表
+        app.setStyleSheet("""
+            QMainWindow, QWidget { 
+                background-color: #2b2b2b; 
+                color: #ffffff; 
+            }
+            /* 标题栏样式 */
+            QMainWindow::title {
+                background-color: #2b2b2b;
+                color: #ffffff;
+            }
+            QMainWindow::titleBar {
+                background-color: #2b2b2b;
+                color: #ffffff;
+            }
+            QTitleBar {
+                background-color: #2b2b2b;
+                color: #ffffff;
+            }
+            QMenuBar { 
+                background-color: #2b2b2b; 
+                color: #ffffff; 
+                border-bottom: 1px solid #555555;
+            }
+            QMenuBar::item {
+                background-color: transparent;
+                padding: 4px 8px;
+            }
+            QMenuBar::item:selected {
+                background-color: #3b3b3b;
+                border-radius: 3px;
+            }
+            QMenuBar::item:pressed {
+                background-color: #4b4b4b;
+            }
+            QMenu {
+                background-color: #2b2b2b;
+                border: 1px solid #555555;
+            }
+            QMenu::item {
+                padding: 5px 30px 5px 20px;
+                border: 1px solid transparent;
+            }
+            QMenu::item:selected {
+                background-color: #3b3b3b;
+            }
+            QLineEdit, QComboBox { 
+                background-color: #3b3b3b; 
+                border: 1px solid #555555; 
+                padding: 5px; 
+                border-radius: 3px; 
+            }
+            QPushButton { 
+                background-color: #3b3b3b; 
+                border: 1px solid #555555; 
+                padding: 5px 10px; 
+                border-radius: 3px; 
+            }
+            QPushButton:hover { 
+                background-color: #4b4b4b; 
+                border-color: #666666; 
+            }
+            QPushButton:pressed { 
+                background-color: #2b2b2b; 
+                border-color: #777777; 
+            }
+            QPushButton:disabled { 
+                background-color: #2b2b2b; 
+                color: #666666; 
+                border-color: #444444; 
+            }
+            QComboBox:drop-down { 
+                border: none; 
+                width: 20px; 
+            }
+            QComboBox:down-arrow { 
+                image: none; 
+            }
+            QComboBox QAbstractItemView { 
+                background-color: #3b3b3b; 
+                selection-background-color: #4b4b4b; 
+                border: 1px solid #555555; 
+            }
+            QMenuBar { 
+                background-color: #2b2b2b; 
+                color: #ffffff; 
+                border-bottom: 1px solid #555555; 
+            }
+            QMenuBar::item:selected, QMenu::item:selected { 
+                background-color: #3b3b3b; 
+            }
+            QMenu { 
+                background-color: #2b2b2b; 
+                border: 1px solid #555555; 
+                padding: 5px 0px; 
+            }
+            QMenu::item { 
+                padding: 5px 20px; 
+            }
+        """)
         
         # 检查必要文件是否存在
         required_files = ['yt-dlp.exe', 'ffmpeg.exe']
@@ -415,39 +645,23 @@ def main():
             QMessageBox.critical(None, '错误', error_msg)
             return
             
-        # 检查FFmpeg所需的DLL文件
-        ffmpeg_dlls = [
-            'avcodec-61.dll', 'avformat-61.dll', 'avutil-59.dll',
-            'swresample-5.dll', 'swscale-8.dll', 'avfilter-10.dll',
-            'avdevice-61.dll', 'postproc-58.dll'
-        ]
+        
         
         # 创建DLL目录
         dll_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'dll')
         os.makedirs(dll_dir, exist_ok=True)
+    
         
-        # 检查DLL文件是否存在
-        missing_dlls = []
-        for dll in ffmpeg_dlls:
-            if not (os.path.exists(dll) or os.path.exists(os.path.join(dll_dir, dll))):
-                missing_dlls.append(dll)
         
-        if missing_dlls:
-            warning_msg = f'缺少FFmpeg所需的DLL文件：{", ".join(missing_dlls)}\n音视频合并功能可能无法正常工作。'
-            log_message('WARNING', warning_msg)
-            QMessageBox.warning(None, '警告', warning_msg)
-            
         # 设置环境变量，确保FFmpeg能找到DLL文件
         os.environ['PATH'] = os.path.dirname(os.path.abspath(__file__)) + os.pathsep + \
                             dll_dir + os.pathsep + os.environ.get('PATH', '')
 
         window = MainWindow()
         window.show()
-        log_message('INFO', '主窗口已显示')
         sys.exit(app.exec())
     except Exception as e:
         error_msg = f'程序启动失败：{str(e)}'
-        log_message('ERROR', error_msg, traceback.format_exc())
         QMessageBox.critical(None, '错误', error_msg)
         return
 
