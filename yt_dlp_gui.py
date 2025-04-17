@@ -5,36 +5,37 @@ import time
 import traceback
 import subprocess
 import ctypes
+import tempfile
 
 # 导入Qt相关模块
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QLabel, QLineEdit, QPushButton,
                              QProgressBar, QComboBox, QFileDialog, QMessageBox, QMenu)
-from PyQt6.QtGui import QAction, QIcon
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtGui import QAction, QIcon
 
 class SniffThread(QThread):
     progress_signal = pyqtSignal(str)
     finished_signal = pyqtSignal(bool, str, list)
 
-    def __init__(self, url):
-        super().__init__()
+    def __init__(self, url, parent=None):
+        super().__init__(parent)
         self.url = url
         self.is_running = True
         self.available_formats = []
 
     def run(self):
         try:
-            # 检查是否为YouTube链接，只有YouTube链接才需要Cookie
+            # 检查是否为YouTube链接，YouTube链接需要Cookies
             is_youtube = 'youtube.com' in self.url.lower() or 'youtu.be' in self.url.lower()
             
-            if is_youtube and not os.path.exists('YouTube-Cookies.txt'):
+            if is_youtube and not os.path.exists(self.parent().cookie_file):
                 self.finished_signal.emit(False, '未找到Cookies文件，请先更新Cookies！', [])
                 return
                 
-            # 根据URL类型决定是否使用Cookie
+            # 根据URL类型决定是否使用Cookies
             if is_youtube:
-                cmd = ['yt-dlp.exe', '-F', '--cookies', 'YouTube-Cookies.txt', self.url, '--newline']
+                cmd = ['yt-dlp.exe', '-F', '--cookies', self.parent().cookie_file, self.url, '--newline']
             else:
                 cmd = ['yt-dlp.exe', '-F', self.url, '--newline']
             process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, creationflags=subprocess.CREATE_NO_WINDOW)
@@ -51,13 +52,47 @@ class SniffThread(QThread):
                     if len(parts) >= 3:
                         format_id = parts[0]
                         resolution = None
+                        fps = None
+                        filesize = 0
+                        
+                        # 解析分辨率
                         for part in parts:
                             if 'x' in part and part[0].isdigit():
                                 resolution = part.split('x')[1] + 'p'
                                 break
                         
+                        # 解析帧率
+                        for part in parts:
+                            if 'fps' in part.lower():
+                                try:
+                                    fps = int(float(part.lower().replace('fps', '')))
+                                except:
+                                    pass
+                                break
+                        
+                        # 解析文件大小
+                        for part in parts:
+                            if 'mib' in part.lower() or 'gib' in part.lower():
+                                try:
+                                    size = float(part[:-3])
+                                    if 'gib' in part.lower():
+                                        filesize = round(size * 1024, 1)
+                                    else:
+                                        filesize = round(size, 1)
+                                except:
+                                    pass
+                                break
+                        
                         if resolution and resolution.endswith('p'):
-                            self.available_formats.append((format_id, resolution + '/H.264'))
+                            format_info = f"{resolution}/H.264"
+                            if fps:
+                                format_info += f"/{fps}fps"
+                            if filesize > 0:
+                                if filesize >= 1024:
+                                    format_info += f"/{round(filesize/1024, 1)}GB"
+                                else:
+                                    format_info += f"/{filesize}MB"
+                            self.available_formats.append((format_id, format_info))
             
             if not self.is_running:
                 process.terminate()
@@ -96,8 +131,8 @@ class DownloadThread(QThread):
     progress_signal = pyqtSignal(str)
     finished_signal = pyqtSignal(bool, str)
 
-    def __init__(self, url, format_id):
-        super().__init__()
+    def __init__(self, url, format_id, parent=None):
+        super().__init__(parent)
         self.url = url
         self.format_id = format_id
         self.is_running = True
@@ -109,7 +144,7 @@ class DownloadThread(QThread):
             is_youtube = 'youtube.com' in self.url.lower() or 'youtu.be' in self.url.lower()
             
             if is_youtube:
-                cmd = ['yt-dlp.exe', '-f', f'{self.format_id}+bestaudio[ext=m4a]', '--cookies', 'YouTube-Cookies.txt', '--merge-output-format', 'mp4', self.url, '--newline']
+                cmd = ['yt-dlp.exe', '-f', f'{self.format_id}+bestaudio[ext=m4a]', '--cookies', self.parent().cookie_file, '--merge-output-format', 'mp4', self.url, '--newline']
             else:
                 cmd = ['yt-dlp.exe', '-f', f'{self.format_id}+bestaudio[ext=m4a]', '--merge-output-format', 'mp4', self.url, '--newline']
             process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, creationflags=subprocess.CREATE_NO_WINDOW)
@@ -131,14 +166,10 @@ class DownloadThread(QThread):
     def stop(self):
         self.is_running = False
 
-# 在顶部导入部分添加 QIcon
-from PyQt6.QtGui import QAction, QIcon
-
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle('yt_dlp_gui')
-        self.setWindowIcon(QIcon('icons/favicon.ico'))  # 修改图标路径
         self.setMinimumSize(533, 400)
         # 在Windows 10/11上设置深色标题栏
         # 导入必要的模块
@@ -186,7 +217,7 @@ class MainWindow(QMainWindow):
             pass
         self.download_thread = None
         self.sniff_thread = None
-        self.cookie_file = 'YouTube-Cookies.txt'
+        self.cookie_file = os.path.join(tempfile.gettempdir(), 'YouTube-Cookies.txt')
         self.format_id_map = {}
         self.is_sniffing = False
 
@@ -220,7 +251,7 @@ class MainWindow(QMainWindow):
         format_layout.addWidget(self.format_combo)
         layout.addLayout(format_layout)
 
-        # Cookie设置区域
+        # Cookies设置区域
         self.cookie_container = QWidget()
         cookie_layout = QVBoxLayout(self.cookie_container)
         cookie_layout.setContentsMargins(10, 10, 10, 0)  # 与其他区域保持一致的边距
@@ -282,7 +313,7 @@ class MainWindow(QMainWindow):
                 self.sniff_thread.stop()
                 self.sniff_thread.wait()
                 
-            self.sniff_thread = SniffThread(url)
+            self.sniff_thread = SniffThread(url, self)
             self.sniff_thread.progress_signal.connect(self.update_progress)
             self.sniff_thread.finished_signal.connect(self.sniff_finished)
             self.sniff_thread.start()
@@ -302,7 +333,7 @@ class MainWindow(QMainWindow):
 
         self.download_button.setText('正在下载中')
         self.download_button.setEnabled(False)  # 设置按钮为不可用状态
-        self.download_thread = DownloadThread(url, format_id)
+        self.download_thread = DownloadThread(url, format_id, self)
         self.progress_text.setText('正在下载中...')
         self.download_thread.progress_signal.connect(self.update_progress)
         self.download_thread.finished_signal.connect(self.download_finished)
@@ -361,7 +392,7 @@ class MainWindow(QMainWindow):
         # 创建自定义的关于对话框
         about_box = QMessageBox(self)
         about_box.setWindowTitle('关于')
-        about_box.setText('基于yt-dlp的视频下载工具\n为了兼容我只允许它下载H.264\n主要下载YouTube和bilibili视频\n\n作者：@少昊金天氏\n\n版本：v1.0.0\n\n更新时间：2025-03-31')
+        about_box.setText('基于yt-dlp的视频下载工具\n为了兼容我只允许它下载H.264\n主要下载YouTube和bilibili视频\n\n作者：@少昊金天氏\n\n版本：v1.0.1\n\n更新时间：2025-04-17')
         about_box.setIcon(QMessageBox.Icon.Information)
         
         # 设置对话框的深色标题栏
@@ -511,10 +542,20 @@ class MainWindow(QMainWindow):
 
 def main():
     try:
-        
         # 首先初始化QApplication，确保在使用任何Qt组件前完成初始化
         app = QApplication(sys.argv)
-        app.setWindowIcon(QIcon('icons/favicon.ico'))  # 修改应用程序图标路径
+        # 修改应用程序图标
+        try:
+            if getattr(sys, 'frozen', False):
+                # PyInstaller打包后的路径
+                base_path = sys._MEIPASS
+            else:
+                # 开发环境路径
+                base_path = os.path.dirname(os.path.abspath(__file__))
+            icon_path = os.path.join(base_path, '003.ico')
+            app.setWindowIcon(QIcon(icon_path))
+        except Exception as e:
+            print(f"设置应用程序图标失败: {e}")
         
         # 设置深色主题样式
         from PyQt6.QtGui import QPalette
@@ -635,17 +676,6 @@ def main():
                 padding: 5px 20px; 
             }
         """)
-        
-        # 检查必要文件是否存在
-        required_files = ['yt-dlp.exe', 'ffmpeg.exe']
-        missing_files = [f for f in required_files if not os.path.exists(f)]
-        if missing_files:
-            error_msg = f'缺少必要文件：{", ".join(missing_files)}\n请确保程序目录下包含这些文件。'
-            log_message('ERROR', error_msg)
-            QMessageBox.critical(None, '错误', error_msg)
-            return
-            
-        
         
         # 创建DLL目录
         dll_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'dll')
