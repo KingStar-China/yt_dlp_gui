@@ -5,19 +5,12 @@ import time
 import traceback
 import subprocess
 import ctypes
-<<<<<<< HEAD
 import tempfile
-=======
->>>>>>> 40052f5497c696c139a83b1c9406571b279ebd46
 
 # 导入Qt相关模块
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QLabel, QLineEdit, QPushButton,
                              QProgressBar, QComboBox, QFileDialog, QMessageBox, QMenu)
-<<<<<<< HEAD
-=======
-from PyQt6.QtGui import QAction, QIcon
->>>>>>> 40052f5497c696c139a83b1c9406571b279ebd46
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QAction, QIcon
 
@@ -173,14 +166,10 @@ class DownloadThread(QThread):
     def stop(self):
         self.is_running = False
 
-# 在顶部导入部分添加 QIcon
-from PyQt6.QtGui import QAction, QIcon
-
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle('yt_dlp_gui')
-        self.setWindowIcon(QIcon('icons/favicon.ico'))  # 修改图标路径
         self.setMinimumSize(533, 400)
         # 在Windows 10/11上设置深色标题栏
         # 导入必要的模块
@@ -403,11 +392,7 @@ class MainWindow(QMainWindow):
         # 创建自定义的关于对话框
         about_box = QMessageBox(self)
         about_box.setWindowTitle('关于')
-<<<<<<< HEAD
         about_box.setText('基于yt-dlp的视频下载工具\n为了兼容我只允许它下载H.264\n主要下载YouTube和bilibili视频\n\n作者：@少昊金天氏\n\n版本：v1.0.1\n\n更新时间：2025-04-17')
-=======
-        about_box.setText('基于yt-dlp的视频下载工具\n为了兼容我只允许它下载H.264\n主要下载YouTube和bilibili视频\n\n作者：@少昊金天氏\n\n版本：v1.0.0\n\n更新时间：2025-03-31')
->>>>>>> 40052f5497c696c139a83b1c9406571b279ebd46
         about_box.setIcon(QMessageBox.Icon.Information)
         
         # 设置对话框的深色标题栏
@@ -557,7 +542,6 @@ class MainWindow(QMainWindow):
 
 def main():
     try:
-<<<<<<< HEAD
         # 首先初始化QApplication，确保在使用任何Qt组件前完成初始化
         app = QApplication(sys.argv)
         # 修改应用程序图标
@@ -692,143 +676,6 @@ def main():
                 padding: 5px 20px; 
             }
         """)
-=======
-        
-        # 首先初始化QApplication，确保在使用任何Qt组件前完成初始化
-        app = QApplication(sys.argv)
-        app.setWindowIcon(QIcon('icons/favicon.ico'))  # 修改应用程序图标路径
-        
-        # 设置深色主题样式
-        from PyQt6.QtGui import QPalette
-        app.setStyle('Fusion')
-        dark_palette = QPalette()
-        dark_palette.setColor(QPalette.ColorRole.Window, Qt.GlobalColor.darkGray)
-        dark_palette.setColor(QPalette.ColorRole.WindowText, Qt.GlobalColor.white)
-        dark_palette.setColor(QPalette.ColorRole.Base, Qt.GlobalColor.darkGray)
-        dark_palette.setColor(QPalette.ColorRole.AlternateBase, Qt.GlobalColor.darkGray)
-        dark_palette.setColor(QPalette.ColorRole.ToolTipBase, Qt.GlobalColor.darkGray)
-        dark_palette.setColor(QPalette.ColorRole.ToolTipText, Qt.GlobalColor.white)
-        dark_palette.setColor(QPalette.ColorRole.Text, Qt.GlobalColor.white)
-        dark_palette.setColor(QPalette.ColorRole.Button, Qt.GlobalColor.darkGray)
-        dark_palette.setColor(QPalette.ColorRole.ButtonText, Qt.GlobalColor.white)
-        dark_palette.setColor(QPalette.ColorRole.BrightText, Qt.GlobalColor.red)
-        dark_palette.setColor(QPalette.ColorRole.Link, Qt.GlobalColor.cyan)
-        dark_palette.setColor(QPalette.ColorRole.Highlight, Qt.GlobalColor.cyan)
-        dark_palette.setColor(QPalette.ColorRole.HighlightedText, Qt.GlobalColor.black)
-        app.setPalette(dark_palette)
-        
-        # 设置深色主题样式表
-        app.setStyleSheet("""
-            QMainWindow, QWidget { 
-                background-color: #2b2b2b; 
-                color: #ffffff; 
-            }
-            /* 标题栏样式 */
-            QMainWindow::title {
-                background-color: #2b2b2b;
-                color: #ffffff;
-            }
-            QMainWindow::titleBar {
-                background-color: #2b2b2b;
-                color: #ffffff;
-            }
-            QTitleBar {
-                background-color: #2b2b2b;
-                color: #ffffff;
-            }
-            QMenuBar { 
-                background-color: #2b2b2b; 
-                color: #ffffff; 
-                border-bottom: 1px solid #555555;
-            }
-            QMenuBar::item {
-                background-color: transparent;
-                padding: 4px 8px;
-            }
-            QMenuBar::item:selected {
-                background-color: #3b3b3b;
-                border-radius: 3px;
-            }
-            QMenuBar::item:pressed {
-                background-color: #4b4b4b;
-            }
-            QMenu {
-                background-color: #2b2b2b;
-                border: 1px solid #555555;
-            }
-            QMenu::item {
-                padding: 5px 30px 5px 20px;
-                border: 1px solid transparent;
-            }
-            QMenu::item:selected {
-                background-color: #3b3b3b;
-            }
-            QLineEdit, QComboBox { 
-                background-color: #3b3b3b; 
-                border: 1px solid #555555; 
-                padding: 5px; 
-                border-radius: 3px; 
-            }
-            QPushButton { 
-                background-color: #3b3b3b; 
-                border: 1px solid #555555; 
-                padding: 5px 10px; 
-                border-radius: 3px; 
-            }
-            QPushButton:hover { 
-                background-color: #4b4b4b; 
-                border-color: #666666; 
-            }
-            QPushButton:pressed { 
-                background-color: #2b2b2b; 
-                border-color: #777777; 
-            }
-            QPushButton:disabled { 
-                background-color: #2b2b2b; 
-                color: #666666; 
-                border-color: #444444; 
-            }
-            QComboBox:drop-down { 
-                border: none; 
-                width: 20px; 
-            }
-            QComboBox:down-arrow { 
-                image: none; 
-            }
-            QComboBox QAbstractItemView { 
-                background-color: #3b3b3b; 
-                selection-background-color: #4b4b4b; 
-                border: 1px solid #555555; 
-            }
-            QMenuBar { 
-                background-color: #2b2b2b; 
-                color: #ffffff; 
-                border-bottom: 1px solid #555555; 
-            }
-            QMenuBar::item:selected, QMenu::item:selected { 
-                background-color: #3b3b3b; 
-            }
-            QMenu { 
-                background-color: #2b2b2b; 
-                border: 1px solid #555555; 
-                padding: 5px 0px; 
-            }
-            QMenu::item { 
-                padding: 5px 20px; 
-            }
-        """)
-        
-        # 检查必要文件是否存在
-        required_files = ['yt-dlp.exe', 'ffmpeg.exe']
-        missing_files = [f for f in required_files if not os.path.exists(f)]
-        if missing_files:
-            error_msg = f'缺少必要文件：{", ".join(missing_files)}\n请确保程序目录下包含这些文件。'
-            log_message('ERROR', error_msg)
-            QMessageBox.critical(None, '错误', error_msg)
-            return
-            
-        
->>>>>>> 40052f5497c696c139a83b1c9406571b279ebd46
         
         # 创建DLL目录
         dll_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'dll')
