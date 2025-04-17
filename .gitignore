@@ -23,7 +23,10 @@ wheels/
 # 项目特定文件
 YouTube-Cookies.txt
 *.mp4
+icons/
 dll/
 *.exe
 二舅下载的视频/
 鲜艺AI抠图结果/
+.gitignore
+RELEASE.md
