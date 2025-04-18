@@ -46,8 +46,8 @@ class SniffThread(QThread):
                     break
                 self.progress_signal.emit(line.strip())
                 
-                # 解析H.264视频格式
-                if 'avc1' in line.lower() or 'h264' in line.lower():
+                # 解析H.264视频格式和音频格式
+                if 'avc1' in line.lower() or 'h264' in line.lower() or 'm4a' in line.lower() or 'aac' in line.lower():
                     parts = line.split()
                     if len(parts) >= 3:
                         format_id = parts[0]
@@ -65,34 +65,153 @@ class SniffThread(QThread):
                         for part in parts:
                             if 'fps' in part.lower():
                                 try:
-                                    fps = int(float(part.lower().replace('fps', '')))
-                                except:
-                                    pass
+                                    # 提取fps值，处理多种格式
+                                    fps_str = part.lower()
+                                    # 移除非数字字符
+                                    fps_val = ''.join([c for c in fps_str if c.isdigit() or c == '.'])
+                                    if fps_val:
+                                        fps = int(float(fps_val))
+                                        print(f"成功解析帧率: {fps}fps")
+                                except Exception as e:
+                                    print(f"解析帧率错误: {e}")
                                 break
                         
-                        # 解析文件大小
-                        for part in parts:
-                            if 'mib' in part.lower() or 'gib' in part.lower():
+                        # 如果没有找到fps信息，尝试在整行中查找
+                        if fps is None:
+                            try:
+                                # 使用正则表达式查找fps值
+                                fps_match = re.search(r'(\d+(\.\d+)?)\s*fps', line.lower())
+                                if fps_match:
+                                    fps = int(float(fps_match.group(1)))
+                                    print(f"通过正则表达式解析帧率: {fps}fps")
+                            except Exception as e:
+                                print(f"正则解析帧率错误: {e}")
+                                
+                        # 如果没有找到文件大小信息，尝试在整行中查找
+                        if filesize == 0:
+                            try:
+                                # 查找文件大小信息
+                                size_match = re.search(r'(\d+(\.\d+)?)\s*(G|M|K)iB', line, re.IGNORECASE)
+                                if size_match:
+                                    size = float(size_match.group(1))
+                                    unit = size_match.group(3).upper()
+                                    if unit == 'G':
+                                        filesize = size * 1024  # 转换为MB
+                                        print(f"通过正则表达式解析到GiB大小: {size}GiB = {filesize}MB")
+                                    elif unit == 'M':
+                                        filesize = size
+                                        print(f"通过正则表达式解析到MiB大小: {size}MiB")
+                                    elif unit == 'K':
+                                        filesize = size / 1024
+                                        print(f"通过正则表达式解析到KiB大小: {size}KiB = {filesize}MB")
+                            except Exception as e:
+                                print(f"正则解析文件大小错误: {e}")
+                        
+                        # 解析视频流大小
+                        for i, part in enumerate(parts):
+                            # 检查当前部分或下一部分是否包含文件大小信息
+                            if ('filesize' in part.lower() or 'filesize_approx' in part.lower() or 
+                                'mib' in part.lower() or 'gib' in part.lower() or 'kib' in part.lower() or
+                                (i < len(parts) - 1 and ('mib' in parts[i+1].lower() or 'gib' in parts[i+1].lower() or 'kib' in parts[i+1].lower()))):
                                 try:
-                                    size = float(part[:-3])
-                                    if 'gib' in part.lower():
-                                        filesize = round(size * 1024, 1)
-                                    else:
-                                        filesize = round(size, 1)
-                                except:
-                                    pass
+                                    # 提取文件大小信息，处理多种格式
+                                    size_str = ''
+                                    
+                                    # 处理形如 "76.46MiB" 的格式
+                                    if 'mib' in part.lower() or 'gib' in part.lower() or 'kib' in part.lower():
+                                        size_str = part
+                                    # 处理形如 "~123.87MiB" 的格式
+                                    elif '~' in part and (i < len(parts) - 1) and ('mib' in parts[i+1].lower() or 'gib' in parts[i+1].lower() or 'kib' in parts[i+1].lower()):
+                                        size_str = part.replace('~', '') + ' ' + parts[i+1]
+                                    # 处理形如 "123.87 MiB" 的格式
+                                    elif part.replace('.', '', 1).isdigit() and (i < len(parts) - 1) and ('mib' in parts[i+1].lower() or 'gib' in parts[i+1].lower() or 'kib' in parts[i+1].lower()):
+                                        size_str = part + ' ' + parts[i+1]
+                                    # 处理其他格式
+                                    elif '~' in part:
+                                        size_str = part.split('~')[-1]
+                                    elif '=' in part:
+                                        size_str = part.split('=')[-1]
+                                    elif part.lower().startswith('filesize'):
+                                        size_str = part.lower().replace('filesize', '').replace('_approx', '').strip()
+                                    
+                                    if size_str:
+                                        # 提取数字部分，处理各种格式
+                                        # 先移除波浪号和空格
+                                        clean_str = size_str.replace('~', '').strip()
+                                        # 提取数字部分
+                                        num_part = ''
+                                        for c in clean_str:
+                                            if c.isdigit() or c == '.':
+                                                num_part += c
+                                            # 遇到第一个非数字非点的字符就停止
+                                            elif num_part:
+                                                break
+                                        
+                                        if num_part:
+                                            try:
+                                                size = float(num_part)
+                                                # 根据单位转换大小
+                                                if 'gib' in size_str.lower() or 'g' in size_str.lower():
+                                                    filesize = size * 1024  # 转换为MB
+                                                    print(f"解析到GiB大小: {size}GiB = {filesize}MB")
+                                                elif 'mib' in size_str.lower() or 'm' in size_str.lower():
+                                                    filesize = size
+                                                    print(f"解析到MiB大小: {size}MiB")
+                                                elif 'kib' in size_str.lower() or 'k' in size_str.lower():
+                                                    filesize = size / 1024
+                                                    print(f"解析到KiB大小: {size}KiB = {filesize}MB")
+                                            except Exception as e:
+                                                print(f"转换文件大小错误: {e}, 原始字符串: {size_str}, 提取数字: {num_part}")
+                                except Exception as e:
+                                    print(f"解析文件大小错误: {e}")
                                 break
                         
-                        if resolution and resolution.endswith('p'):
-                            format_info = f"{resolution}/H.264"
+                        # 判断是否为音频格式
+                        is_audio = 'm4a' in line.lower() or 'aac' in line.lower()
+                        
+                        if (resolution and resolution.endswith('p')) or is_audio:
+                            if is_audio:
+                                format_info = "音频/AAC"
+                            else:
+                                format_info = f"{resolution}/H.264"
                             if fps:
                                 format_info += f"/{fps}fps"
                             if filesize > 0:
                                 if filesize >= 1024:
-                                    format_info += f"/{round(filesize/1024, 1)}GB"
+                                    format_info += f"/{round(filesize/1024, 2)}GB"
                                 else:
-                                    format_info += f"/{filesize}MB"
-                            self.available_formats.append((format_id, format_info))
+                                    format_info += f"/{round(filesize, 1)}MB"
+                            else:
+                                # 如果没有解析到文件大小，尝试在整行中查找
+                                try:
+                                    size_match = re.search(r'~?\s*(\d+(\.\d+)?)\s*(G|M|K)i?B', line, re.IGNORECASE)
+                                    if size_match:
+                                        size = float(size_match.group(1))
+                                        unit = size_match.group(3).upper()
+                                        if unit == 'G':
+                                            filesize = size * 1024  # 转换为MB
+                                            format_info += f"/{round(size, 2)}GB"
+                                            print(f"最后尝试解析到GiB大小: {size}GiB")
+                                        elif unit == 'M':
+                                            filesize = size
+                                            format_info += f"/{round(size, 1)}MB"
+                                            print(f"最后尝试解析到MiB大小: {size}MiB")
+                                        elif unit == 'K':
+                                            filesize = size / 1024
+                                            format_info += f"/{round(size, 1)}KB"
+                                            print(f"最后尝试解析到KiB大小: {size}KiB")
+                                except Exception as e:
+                                    print(f"最后尝试解析文件大小错误: {e}")
+                            # 打印调试信息
+                            print(f"添加格式: ID={format_id}, 信息={format_info}, 分辨率={resolution}, 帧率={fps}, 大小={filesize}MB")
+                            # 确保格式信息不重复添加
+                            format_exists = False
+                            for existing_id, existing_info in self.available_formats:
+                                if existing_id == format_id:
+                                    format_exists = True
+                                    break
+                            if not format_exists:
+                                self.available_formats.append((format_id, format_info))
             
             if not self.is_running:
                 process.terminate()
@@ -157,6 +276,48 @@ class DownloadThread(QThread):
             
             process.wait()
             if process.returncode == 0:
+                # 获取下载的文件名
+                downloaded_file = None
+                for line in process.stdout.readlines():
+                    if '[download] Destination:' in line:
+                        downloaded_file = line.split(':', 1)[1].strip()
+                        break
+                
+                if downloaded_file and os.path.exists(downloaded_file):
+                    # 获取文件大小
+                    file_size = os.path.getsize(downloaded_file)
+                    file_size_str = ''
+                    if file_size >= 1024 * 1024 * 1024:  # GB
+                        file_size_str = f'.{round(file_size / (1024 * 1024 * 1024), 2)}G'
+                    elif file_size >= 1024 * 1024:  # MB
+                        file_size_str = f'.{round(file_size / (1024 * 1024), 1)}M'
+                    elif file_size >= 1024:  # KB
+                        file_size_str = f'.{round(file_size / 1024, 1)}K'
+                    
+                    # 获取文件扩展名和基本名称
+                    base_name, ext = os.path.splitext(downloaded_file)
+                    
+                    # 根据文件类型添加不同的后缀
+                    if ext.lower() in ['.m4a', '.aac']:
+                        # 音频文件：添加文件大小
+                        new_name = f'{base_name}{file_size_str}{ext}'
+                    elif ext.lower() == '.mp4':
+                        # 视频文件：添加分辨率
+                        format_info = next((info for id, info in self.parent().format_id_map.items() if id == self.format_id), '')
+                        resolution = format_info.split('/')[0] if format_info else ''
+                        if resolution:
+                            new_name = f'{base_name}.{resolution}{ext}'
+                        else:
+                            new_name = downloaded_file
+                    else:
+                        new_name = downloaded_file
+                    
+                    try:
+                        if new_name != downloaded_file:
+                            os.rename(downloaded_file, new_name)
+                    except Exception as e:
+                        print(f'重命名文件失败：{str(e)}')
+                
                 self.finished_signal.emit(True, '下载完成')
             else:
                 self.finished_signal.emit(False, '下载失败')
@@ -235,6 +396,7 @@ class MainWindow(QMainWindow):
         self.url_input = QLineEdit()
         self.url_input.setPlaceholderText('目录链接批量下载失败别怕，再次点击会继续下载未完成视频。')
         self.url_input.textChanged.connect(self.check_youtube_url)
+        self.url_input.textChanged.connect(self.handle_url_change)
         self.url_input.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.url_input.customContextMenuRequested.connect(self.show_context_menu)
         url_layout.addWidget(url_label)
@@ -244,7 +406,7 @@ class MainWindow(QMainWindow):
         # 格式选择区域
         format_layout = QHBoxLayout()
         format_layout.setContentsMargins(10, 10, 10, 0)  # 与URL输入区域保持一致的边距
-        format_label = QLabel('视频格式：')
+        format_label = QLabel('嗅探结果：')
         format_label.setFixedWidth(60)  # 与URL标签保持相同宽度
         self.format_combo = QComboBox()
         format_layout.addWidget(format_label)
@@ -379,13 +541,9 @@ class MainWindow(QMainWindow):
         self.is_sniffing = False
         self.progress_text.setText(message)
         if success:
-            self.download_button.setText('开始嗅探')
+            self.download_button.setText('开始下载')  # 保持'开始下载'状态以便继续下载其他格式
             QMessageBox.information(self, '成功', '下载完成！')
-            # 清空格式列表，为下一次下载做准备
-            self.format_combo.clear()
-            self.format_id_map.clear()
         else:
-            self.download_button.setText('开始下载')  # 下载失败时保持'开始下载'状态
             QMessageBox.warning(self, '错误', message)
 
     def show_about(self):
@@ -488,19 +646,19 @@ class MainWindow(QMainWindow):
     def show_context_menu(self, pos):
         # 获取触发右键菜单的控件
         sender = self.sender()
+        # 如果输入框有内容，先全选
+        if sender.text():
+            sender.selectAll()
         menu = QMenu(self)
         cut_action = menu.addAction('剪切')
         copy_action = menu.addAction('复制')
         paste_action = menu.addAction('粘贴')
         delete_action = menu.addAction('删除')
-        menu.addSeparator()
-        select_all_action = menu.addAction('全选')
 
         cut_action.triggered.connect(sender.cut)
         copy_action.triggered.connect(sender.copy)
         paste_action.triggered.connect(sender.paste)
         delete_action.triggered.connect(sender.clear)
-        select_all_action.triggered.connect(sender.selectAll)
 
         menu.exec(sender.mapToGlobal(pos))
 
@@ -539,6 +697,25 @@ class MainWindow(QMainWindow):
                 event.accept()
             else:
                 event.ignore()
+
+    def handle_url_change(self):
+        # 清空格式选择框和相关状态
+        self.format_combo.clear()
+        self.format_id_map.clear()
+        self.download_button.setText('开始嗅探')
+        self.progress_text.setText('准备就绪')
+        
+        # 如果正在进行嗅探或下载，停止它们
+        if self.sniff_thread and self.sniff_thread.isRunning():
+            self.sniff_thread.stop()
+            self.sniff_thread.wait()
+        
+        if self.download_thread and self.download_thread.isRunning():
+            self.download_thread.stop()
+            self.download_thread.wait()
+        
+        self.download_button.setEnabled(True)
+        self.is_sniffing = False
 
 def main():
     try:
