@@ -550,7 +550,7 @@ class MainWindow(QMainWindow):
         # 创建自定义的关于对话框
         about_box = QMessageBox(self)
         about_box.setWindowTitle('关于')
-        about_box.setText('基于yt-dlp的视频下载工具\n为了兼容我只允许它下载H.264\n主要下载YouTube和bilibili视频\n\n作者：@少昊金天氏\n\n版本：v1.0.1\n\n更新时间：2025-04-17')
+        about_box.setText('基于yt-dlp的视频下载工具\n为了兼容我只允许它下载H.264\n主要下载YouTube和bilibili视频\n\n作者：@少昊金天氏\n\n版本：v1.0.2\n\n更新时间：2025-04-22')
         about_box.setIcon(QMessageBox.Icon.Information)
         
         # 设置对话框的深色标题栏
