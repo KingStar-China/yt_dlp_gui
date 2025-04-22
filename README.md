@@ -5,30 +5,5 @@
 ## 功能特点
 
 - 支持输入视频URL进行下载
-- 提供多种视频质量选项（1080p、720p、480p）
-- 自动使用YouTube-Cookies进行授权
+- 提供多种视频质量选项
 - 实时显示下载进度
-
-## 安装步骤
-
-1. 确保已安装Python 3.8或更高版本
-2. 安装依赖包：
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-## 使用方法
-
-### 直接运行Python脚本
-
-```bash
-python yt_dlp_gui.py
-```
-
-### 打包成独立exe文件
-
-```bash
-pyinstaller yt_dlp_gui.spec
-```
-
-打包后的可执行文件将在`dist/yt_dlp_gui`目录中。
