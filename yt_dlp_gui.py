@@ -237,9 +237,9 @@ class SniffThread(QThread):
                 }
                 
                 self.available_formats.sort(key=lambda x: resolutions.get(x[1].split('/')[0], 0), reverse=True)
-                self.finished_signal.emit(True, '视频格式嗅探完成', self.available_formats)
+                self.finished_signal.emit(True, '嗅探完成', self.available_formats)
             else:
-                self.finished_signal.emit(False, '视频格式嗅探失败', [])
+                self.finished_signal.emit(False, '嗅探失败', [])
         except Exception as e:
             self.finished_signal.emit(False, f'嗅探时发生错误：{str(e)}', [])
 
@@ -540,8 +540,8 @@ class MainWindow(QMainWindow):
         self.download_button.setEnabled(True)  # 恢复按钮为可用状态
         self.is_sniffing = False
         self.progress_text.setText(message)
+        self.download_button.setText('开始下载')  # 无论成功失败都显示"开始下载"
         if success:
-            self.download_button.setText('开始下载')  # 保持'开始下载'状态以便继续下载其他格式
             QMessageBox.information(self, '成功', '下载完成！')
         else:
             QMessageBox.warning(self, '错误', message)
