@@ -51,6 +51,7 @@ class SniffThread(QThread):
         self.available_formats = []
         self.subtitle_entries = []
         self.process = None
+        self.subtitle_process = None
 
     def build_sniff_cmd(self, cookie_mode):
         cmd = [self.parent().get_ytdlp_command(), '-F']
@@ -78,7 +79,9 @@ class SniffThread(QThread):
             text=True,
             creationflags=subprocess.CREATE_NO_WINDOW,
         )
+        self.subtitle_process = process
         output, _ = process.communicate()
+        self.subtitle_process = None
         if process.returncode != 0:
             return
 
@@ -300,6 +303,8 @@ class SniffThread(QThread):
         self.is_running = False
         if self.process and self.process.poll() is None:
             self.process.terminate()
+        if self.subtitle_process and self.subtitle_process.poll() is None:
+            self.subtitle_process.terminate()
 
 class DownloadThread(QThread):
     progress_signal = pyqtSignal(str)
@@ -438,7 +443,8 @@ class UpdateYtDlpThread(QThread):
         try:
             local_version = self.get_local_version()
             latest_version = self.get_latest_version()
-            if local_version and latest_version and local_version == latest_version:
+            target_exists = os.path.exists(self.target_path)
+            if target_exists and local_version and latest_version and local_version == latest_version:
                 self.finished_signal.emit(True, f'无需更新，已经是最新版啦：{local_version}')
                 return
 
@@ -462,7 +468,7 @@ class UpdateYtDlpThread(QThread):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle('yt_dlp_gui v1.0.4 @少昊金天氏')
+        self.setWindowTitle('yt_dlp_gui v1.0.5 @少昊金天氏')
         self.setMinimumSize(533, 400)
         # 在Windows 10/11上设置深色标题栏
         # 导入必要的模块
@@ -720,7 +726,7 @@ class MainWindow(QMainWindow):
         # 创建自定义的关于对话框
         about_box = QMessageBox(self)
         about_box.setWindowTitle('关于')
-        about_box.setText('基于yt-dlp的视频下载工具\n为了兼容我只允许它下载H.264\n主要下载YouTube和bilibili视频\n\n作者：@少昊金天氏\n\n版本：v1.0.3\n\n更新时间：2026-03-24')
+        about_box.setText('基于yt-dlp的视频下载工具\n为了兼容我只允许它下载H.264\n主要下载YouTube和bilibili视频\n\n作者：@少昊金天氏\n\n版本：v1.0.4\n\n更新时间：2026-03-24')
         about_box.setIcon(QMessageBox.Icon.Information)
         
         # 设置对话框的深色标题栏
