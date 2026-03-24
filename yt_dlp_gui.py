@@ -6,6 +6,9 @@ import traceback
 import subprocess
 import ctypes
 import tempfile
+import shutil
+import urllib.request
+import json
 
 # 导入Qt相关模块
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
@@ -14,6 +17,28 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QPlainTextEdit)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QAction, QIcon
+
+
+def get_runtime_dir():
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def get_managed_ytdlp_path():
+    return os.path.join(get_runtime_dir(), 'yt-dlp.exe')
+
+
+def resolve_ytdlp_command():
+    managed_path = get_managed_ytdlp_path()
+    if os.path.exists(managed_path):
+        return managed_path
+
+    path_cmd = shutil.which('yt-dlp.exe') or shutil.which('yt-dlp')
+    if path_cmd:
+        return path_cmd
+
+    return managed_path
 
 class SniffThread(QThread):
     progress_signal = pyqtSignal(str)
@@ -24,10 +49,11 @@ class SniffThread(QThread):
         self.url = url
         self.is_running = True
         self.available_formats = []
+        self.subtitle_entries = []
         self.process = None
 
     def build_sniff_cmd(self, cookie_mode):
-        cmd = ['yt-dlp.exe', '-F']
+        cmd = [self.parent().get_ytdlp_command(), '-F']
         if cookie_mode == 'firefox':
             cmd.extend(['--cookies-from-browser', 'firefox'])
         elif cookie_mode == 'file':
@@ -35,8 +61,50 @@ class SniffThread(QThread):
         cmd.extend([self.url, '--newline'])
         return cmd
 
+    def build_subtitle_cmd(self, cookie_mode):
+        cmd = [self.parent().get_ytdlp_command(), '--list-subs']
+        if cookie_mode == 'firefox':
+            cmd.extend(['--cookies-from-browser', 'firefox'])
+        elif cookie_mode == 'file':
+            cmd.extend(['--cookies', self.parent().cookie_file])
+        cmd.append(self.url)
+        return cmd
+
+    def collect_subtitles(self, cookie_mode):
+        process = subprocess.Popen(
+            self.build_subtitle_cmd(cookie_mode),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        output, _ = process.communicate()
+        if process.returncode != 0:
+            return
+
+        for raw_line in output.splitlines():
+            line = raw_line.strip()
+            subtitle_match = re.match(r'^([a-zA-Z0-9_-]+)\s+(.*)$', line)
+            if not subtitle_match:
+                continue
+            subtitle_lang = subtitle_match.group(1)
+            subtitle_note = subtitle_match.group(2).strip()
+            if subtitle_lang.lower() in {'language', 'code', 'name'}:
+                continue
+            if not re.search(r'(vtt|ttml|srv\d|json3|srt|ass)', subtitle_note, re.IGNORECASE):
+                continue
+
+            subtitle_kind = '自动字幕' if 'auto' in subtitle_note.lower() else '字幕'
+            subtitle_id = f'subtitle:{subtitle_lang}:{"auto" if "auto" in subtitle_note.lower() else "manual"}'
+            subtitle_info = f'{subtitle_kind}/{subtitle_lang}'
+            if subtitle_note:
+                subtitle_info += f'/{subtitle_note}'
+            if not any(existing_id == subtitle_id for existing_id, _ in self.subtitle_entries):
+                self.subtitle_entries.append((subtitle_id, subtitle_info))
+
     def run_sniff(self, cookie_mode):
         self.available_formats = []
+        self.subtitle_entries = []
         process = subprocess.Popen(
             self.build_sniff_cmd(cookie_mode),
             stdout=subprocess.PIPE,
@@ -169,6 +237,7 @@ class SniffThread(QThread):
                         if not any(existing_id == format_id for existing_id, _ in self.available_formats):
                             self.available_formats.append((format_id, format_info))
 
+
         if not self.is_running:
             if process.poll() is None:
                 process.terminate()
@@ -176,8 +245,9 @@ class SniffThread(QThread):
 
         process.wait()
         if process.returncode == 0:
-            if not self.available_formats:
-                return False, '未找到可用的H.264视频格式', []
+            self.collect_subtitles(cookie_mode)
+            if not self.available_formats and not self.subtitle_entries:
+                return False, '未找到可用的H.264视频格式或字幕', []
 
             resolutions = {
                 '2160p': 2160,
@@ -190,7 +260,8 @@ class SniffThread(QThread):
                 '144p': 144,
             }
             self.available_formats.sort(key=lambda x: resolutions.get(x[1].split('/')[0], 0), reverse=True)
-            return True, '嗅探完成', self.available_formats
+            combined_formats = self.available_formats + self.subtitle_entries
+            return True, '嗅探完成', combined_formats
 
         return False, '嗅探失败', []
 
@@ -247,12 +318,25 @@ class DownloadThread(QThread):
             # 检查是否为YouTube链接，只有YouTube链接才需要Cookies
             is_youtube = 'youtube.com' in self.url.lower() or 'youtu.be' in self.url.lower()
             
-            cmd = ['yt-dlp.exe', '-f', f'{self.format_id}+bestaudio[ext=m4a]']
+            is_subtitle = self.format_id.startswith('subtitle:')
+            if is_subtitle:
+                _, subtitle_lang, subtitle_mode = self.format_id.split(':', 2)
+                cmd = [self.parent().get_ytdlp_command()]
+                if subtitle_mode == 'auto':
+                    cmd.append('--write-auto-sub')
+                else:
+                    cmd.append('--write-sub')
+                cmd.extend(['--sub-lang', subtitle_lang, '--convert-subs', 'srt', '--skip-download'])
+            else:
+                cmd = [self.parent().get_ytdlp_command(), '-f', f'{self.format_id}+bestaudio[ext=m4a]']
             if is_youtube and self.parent().cookie_mode == 'firefox':
                 cmd.extend(['--cookies-from-browser', 'firefox'])
             elif is_youtube and self.parent().cookie_mode == 'file' and os.path.exists(self.parent().cookie_file):
                 cmd.extend(['--cookies', self.parent().cookie_file])
-            cmd.extend(['--merge-output-format', 'mp4', self.url, '--newline'])
+            if is_subtitle:
+                cmd.extend([self.url, '--newline'])
+            else:
+                cmd.extend(['--merge-output-format', 'mp4', self.url, '--newline'])
             process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, creationflags=subprocess.CREATE_NO_WINDOW)
             self.process = process
             downloaded_file = None
@@ -286,10 +370,8 @@ class DownloadThread(QThread):
                     
                     # 根据文件类型添加不同的后缀
                     if ext.lower() in ['.m4a', '.aac']:
-                        # 音频文件：添加文件大小
                         new_name = f'{base_name}{file_size_str}{ext}'
                     elif ext.lower() == '.mp4':
-                        # 视频文件：添加分辨率
                         format_info = next((label for label, fmt_id in self.parent().format_id_map.items() if fmt_id == self.format_id), '')
                         resolution = format_info.split('/')[0] if format_info else ''
                         if resolution:
@@ -305,7 +387,7 @@ class DownloadThread(QThread):
                     except Exception as e:
                         print(f'重命名文件失败：{str(e)}')
                 
-                self.finished_signal.emit(True, '下载完成')
+                self.finished_signal.emit(True, '下载完成' if not is_subtitle else '字幕下载完成')
             else:
                 self.finished_signal.emit(False, '下载失败')
         except Exception as e:
@@ -316,10 +398,71 @@ class DownloadThread(QThread):
         if self.process and self.process.poll() is None:
             self.process.terminate()
 
+class UpdateYtDlpThread(QThread):
+    finished_signal = pyqtSignal(bool, str)
+
+    def __init__(self, target_path, current_command, parent=None):
+        super().__init__(parent)
+        self.target_path = target_path
+        self.current_command = current_command
+
+    def get_local_version(self):
+        try:
+            if not self.current_command or not os.path.exists(self.current_command):
+                return None
+            result = subprocess.run(
+                [self.current_command, '--version'],
+                capture_output=True,
+                text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+                timeout=15,
+            )
+            if result.returncode == 0:
+                return result.stdout.strip()
+        except Exception:
+            pass
+        return None
+
+    def get_latest_version(self):
+        request = urllib.request.Request(
+            'https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest',
+            headers={'User-Agent': 'yt_dlp_gui'}
+        )
+        with urllib.request.urlopen(request, timeout=20) as response:
+            data = json.loads(response.read().decode('utf-8'))
+        return str(data.get('tag_name', '')).strip() or None
+
+    def run(self):
+        temp_path = self.target_path + '.download'
+        download_url = 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe'
+        try:
+            local_version = self.get_local_version()
+            latest_version = self.get_latest_version()
+            if local_version and latest_version and local_version == latest_version:
+                self.finished_signal.emit(True, f'无需更新，已经是最新版啦：{local_version}')
+                return
+
+            os.makedirs(os.path.dirname(self.target_path), exist_ok=True)
+            urllib.request.urlretrieve(download_url, temp_path)
+            if os.path.exists(self.target_path):
+                os.remove(self.target_path)
+            os.replace(temp_path, self.target_path)
+
+            final_version = latest_version or self.get_local_version() or '未知版本'
+            self.finished_signal.emit(True, f'yt-dlp 更新完成：{final_version}')
+        except Exception as e:
+            try:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+            except Exception:
+                pass
+            self.finished_signal.emit(False, f'yt-dlp 更新失败：{str(e)}')
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle('yt_dlp_gui v1.0.3 @少昊金天氏')
+        self.setWindowTitle('yt_dlp_gui v1.0.4 @少昊金天氏')
         self.setMinimumSize(533, 400)
         # 在Windows 10/11上设置深色标题栏
         # 导入必要的模块
@@ -367,7 +510,9 @@ class MainWindow(QMainWindow):
             pass
         self.download_thread = None
         self.sniff_thread = None
+        self.update_thread = None
         self.cookie_file = os.path.join(tempfile.gettempdir(), 'YouTube-Cookies.txt')
+        self.ytdlp_path = resolve_ytdlp_command()
         self.cookie_mode = 'none'
         self.manual_cookie_enabled = False
         self.format_id_map = {}
@@ -428,13 +573,19 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.cookie_container)
         self.cookie_container.hide()
 
-        # 下载按钮
+        # 操作按钮
+        action_layout = QHBoxLayout()
+        action_layout.setContentsMargins(0, 0, 0, 0)
         self.download_button = QPushButton('开始嗅探')
         self.download_button.clicked.connect(self.start_download)
-        layout.addWidget(self.download_button)
+        self.update_ytdlp_button = QPushButton('更新 yt-dlp')
+        self.update_ytdlp_button.clicked.connect(self.update_ytdlp)
+        action_layout.addWidget(self.download_button)
+        action_layout.addWidget(self.update_ytdlp_button)
+        layout.addLayout(action_layout)
 
         # 进度显示区域
-        self.progress_text = QLabel('准备就绪')
+        self.progress_text = QLabel('准备就绪！（若下载失败请安装火狐浏览器并登录相应网站，比如油管以获得cookie。）')
         layout.addWidget(self.progress_text)
 
         # 创建菜单栏
@@ -443,6 +594,27 @@ class MainWindow(QMainWindow):
         about_action = QAction('关于', self)
         about_action.triggered.connect(self.show_about)
         help_menu.addAction(about_action)
+
+    def get_ytdlp_command(self):
+        self.ytdlp_path = resolve_ytdlp_command()
+        return self.ytdlp_path
+
+    def update_ytdlp(self):
+        target_path = get_managed_ytdlp_path()
+        self.update_ytdlp_button.setEnabled(False)
+        self.progress_text.setText('正在更新 yt-dlp...')
+        self.update_thread = UpdateYtDlpThread(target_path, self.get_ytdlp_command(), self)
+        self.update_thread.finished_signal.connect(self.update_ytdlp_finished)
+        self.update_thread.start()
+
+    def update_ytdlp_finished(self, success, message):
+        self.update_ytdlp_button.setEnabled(True)
+        self.get_ytdlp_command()
+        self.progress_text.setText(message)
+        if success:
+            QMessageBox.information(self, '成功', message)
+        else:
+            QMessageBox.warning(self, '错误', message)
 
     def start_download(self):
         url = self.url_input.text().strip()
@@ -460,7 +632,7 @@ class MainWindow(QMainWindow):
             self.download_button.setText('正在嗅探中')
             self.download_button.setEnabled(False)  # 设置按钮为不可用状态
             self.is_sniffing = True
-            self.progress_text.setText('正在嗅探能够下载的H.264视频...')
+            self.progress_text.setText('正在嗅探可下载的视频、音频和字幕...')
             
             # 启动嗅探线程
             if self.sniff_thread and self.sniff_thread.isRunning():
@@ -504,7 +676,7 @@ class MainWindow(QMainWindow):
         if success and formats:
             self.cookie_mode = cookie_mode
             self.cookie_container.hide()
-            self.progress_text.setText('H.264视频嗅探完成')
+            self.progress_text.setText('视频/字幕嗅探完成')
             # 清空并更新格式选择框
             self.format_combo.clear()
             self.format_id_map.clear()
@@ -532,7 +704,7 @@ class MainWindow(QMainWindow):
             elif not success:
                 QMessageBox.warning(self, '错误', message)
             elif not formats:
-                QMessageBox.warning(self, '警告', '未找到H.264视频格式')
+                QMessageBox.warning(self, '警告', '未找到可下载的视频格式或字幕')
 
     def download_finished(self, success, message):
         self.download_button.setEnabled(True)  # 恢复按钮为可用状态
@@ -548,7 +720,7 @@ class MainWindow(QMainWindow):
         # 创建自定义的关于对话框
         about_box = QMessageBox(self)
         about_box.setWindowTitle('关于')
-        about_box.setText('基于yt-dlp的视频下载工具\n为了兼容我只允许它下载H.264\n主要下载YouTube和bilibili视频\n\n作者：@少昊金天氏\n\n版本：v1.0.2\n\n更新时间：2025-04-22')
+        about_box.setText('基于yt-dlp的视频下载工具\n为了兼容我只允许它下载H.264\n主要下载YouTube和bilibili视频\n\n作者：@少昊金天氏\n\n版本：v1.0.3\n\n更新时间：2026-03-24')
         about_box.setIcon(QMessageBox.Icon.Information)
         
         # 设置对话框的深色标题栏
@@ -643,14 +815,21 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, '警告', f'Cookies更新失败：{str(e)}')
 
     def show_context_menu(self, pos):
-        # 获取触发右键菜单的控件
         sender = self.sender()
-        # 如果输入框有内容，先全选
+
+        if sender is self.url_input:
+            sender.clear()
+            sender.paste()
+            if sender.text().strip():
+                self.start_download()
+            return
+
         if hasattr(sender, 'toPlainText'):
             if sender.toPlainText():
                 sender.selectAll()
         elif sender.text():
             sender.selectAll()
+
         menu = QMenu(self)
         cut_action = menu.addAction('剪切')
         copy_action = menu.addAction('复制')
@@ -733,8 +912,15 @@ def main():
             else:
                 # 开发环境路径
                 base_path = os.path.dirname(os.path.abspath(__file__))
-            icon_path = os.path.join(base_path, '003.ico')
-            app.setWindowIcon(QIcon(icon_path))
+            icon_candidates = [
+                os.path.join(base_path, 'logo', 'app.ico'),
+                os.path.join(base_path, 'logo', 'Q糖logo.png'),
+                os.path.join(base_path, '003.ico'),
+            ]
+            for icon_path in icon_candidates:
+                if os.path.exists(icon_path):
+                    app.setWindowIcon(QIcon(icon_path))
+                    break
         except Exception as e:
             print(f"设置应用程序图标失败: {e}")
         
