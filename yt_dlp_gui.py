@@ -10,241 +10,225 @@ import tempfile
 # 导入Qt相关模块
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QLabel, QLineEdit, QPushButton,
-                             QProgressBar, QComboBox, QFileDialog, QMessageBox, QMenu)
+                             QProgressBar, QComboBox, QFileDialog, QMessageBox, QMenu,
+                             QPlainTextEdit)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QAction, QIcon
 
 class SniffThread(QThread):
     progress_signal = pyqtSignal(str)
-    finished_signal = pyqtSignal(bool, str, list)
+    finished_signal = pyqtSignal(bool, str, list, str)
 
     def __init__(self, url, parent=None):
         super().__init__(parent)
         self.url = url
         self.is_running = True
         self.available_formats = []
+        self.process = None
 
-    def run(self):
-        try:
-            # 检查是否为YouTube链接，YouTube链接需要Cookies
-            is_youtube = 'youtube.com' in self.url.lower() or 'youtu.be' in self.url.lower()
-            
-            if is_youtube and not os.path.exists(self.parent().cookie_file):
-                self.finished_signal.emit(False, '未找到Cookies文件，请先更新Cookies！', [])
-                return
-                
-            # 根据URL类型决定是否使用Cookies
-            if is_youtube:
-                cmd = ['yt-dlp.exe', '-F', '--cookies', self.parent().cookie_file, self.url, '--newline']
-            else:
-                cmd = ['yt-dlp.exe', '-F', self.url, '--newline']
-            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, creationflags=subprocess.CREATE_NO_WINDOW)
-            
-            while self.is_running:
-                line = process.stdout.readline()
-                if not line:
-                    break
-                self.progress_signal.emit(line.strip())
-                
-                # 解析H.264视频格式和音频格式
-                if 'avc1' in line.lower() or 'h264' in line.lower() or 'm4a' in line.lower() or 'aac' in line.lower():
-                    parts = line.split()
-                    if len(parts) >= 3:
-                        format_id = parts[0]
-                        resolution = None
-                        fps = None
-                        filesize = 0
-                        
-                        # 解析分辨率
-                        for part in parts:
-                            if 'x' in part and part[0].isdigit():
-                                resolution = part.split('x')[1] + 'p'
-                                break
-                        
-                        # 解析帧率
-                        for part in parts:
-                            if 'fps' in part.lower():
-                                try:
-                                    # 提取fps值，处理多种格式
-                                    fps_str = part.lower()
-                                    # 移除非数字字符
-                                    fps_val = ''.join([c for c in fps_str if c.isdigit() or c == '.'])
-                                    if fps_val:
-                                        fps = int(float(fps_val))
-                                        print(f"成功解析帧率: {fps}fps")
-                                except Exception as e:
-                                    print(f"解析帧率错误: {e}")
-                                break
-                        
-                        # 如果没有找到fps信息，尝试在整行中查找
-                        if fps is None:
+    def build_sniff_cmd(self, cookie_mode):
+        cmd = ['yt-dlp.exe', '-F']
+        if cookie_mode == 'firefox':
+            cmd.extend(['--cookies-from-browser', 'firefox'])
+        elif cookie_mode == 'file':
+            cmd.extend(['--cookies', self.parent().cookie_file])
+        cmd.extend([self.url, '--newline'])
+        return cmd
+
+    def run_sniff(self, cookie_mode):
+        self.available_formats = []
+        process = subprocess.Popen(
+            self.build_sniff_cmd(cookie_mode),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        self.process = process
+
+        while self.is_running:
+            line = process.stdout.readline()
+            if not line:
+                break
+            self.progress_signal.emit(line.strip())
+
+            if 'avc1' in line.lower() or 'h264' in line.lower() or 'm4a' in line.lower() or 'aac' in line.lower():
+                parts = line.split()
+                if len(parts) >= 3:
+                    format_id = parts[0]
+                    resolution = None
+                    fps = None
+                    filesize = 0
+
+                    for part in parts:
+                        if 'x' in part and part[0].isdigit():
+                            resolution = part.split('x')[1] + 'p'
+                            break
+
+                    for part in parts:
+                        if 'fps' in part.lower():
                             try:
-                                # 使用正则表达式查找fps值
-                                fps_match = re.search(r'(\d+(\.\d+)?)\s*fps', line.lower())
-                                if fps_match:
-                                    fps = int(float(fps_match.group(1)))
-                                    print(f"通过正则表达式解析帧率: {fps}fps")
+                                fps_str = part.lower()
+                                fps_val = ''.join([c for c in fps_str if c.isdigit() or c == '.'])
+                                if fps_val:
+                                    fps = int(float(fps_val))
+                                    print(f"成功解析帧率: {fps}fps")
                             except Exception as e:
-                                print(f"正则解析帧率错误: {e}")
-                                
-                        # 如果没有找到文件大小信息，尝试在整行中查找
-                        if filesize == 0:
+                                print(f"解析帧率错误: {e}")
+                            break
+
+                    if fps is None:
+                        try:
+                            fps_match = re.search(r'(\d+(\.\d+)?)\s*fps', line.lower())
+                            if fps_match:
+                                fps = int(float(fps_match.group(1)))
+                                print(f"通过正则表达式解析帧率: {fps}fps")
+                        except Exception as e:
+                            print(f"正则解析帧率错误: {e}")
+
+                    if filesize == 0:
+                        try:
+                            size_match = re.search(r'(\d+(\.\d+)?)\s*(G|M|K)iB', line, re.IGNORECASE)
+                            if size_match:
+                                size = float(size_match.group(1))
+                                unit = size_match.group(3).upper()
+                                if unit == 'G':
+                                    filesize = size * 1024
+                                elif unit == 'M':
+                                    filesize = size
+                                elif unit == 'K':
+                                    filesize = size / 1024
+                        except Exception as e:
+                            print(f"正则解析文件大小错误: {e}")
+
+                    for i, part in enumerate(parts):
+                        if ('filesize' in part.lower() or 'filesize_approx' in part.lower() or
+                            'mib' in part.lower() or 'gib' in part.lower() or 'kib' in part.lower() or
+                            (i < len(parts) - 1 and ('mib' in parts[i+1].lower() or 'gib' in parts[i+1].lower() or 'kib' in parts[i+1].lower()))):
                             try:
-                                # 查找文件大小信息
-                                size_match = re.search(r'(\d+(\.\d+)?)\s*(G|M|K)iB', line, re.IGNORECASE)
+                                size_str = ''
+                                if 'mib' in part.lower() or 'gib' in part.lower() or 'kib' in part.lower():
+                                    size_str = part
+                                elif '~' in part and (i < len(parts) - 1) and ('mib' in parts[i+1].lower() or 'gib' in parts[i+1].lower() or 'kib' in parts[i+1].lower()):
+                                    size_str = part.replace('~', '') + ' ' + parts[i+1]
+                                elif part.replace('.', '', 1).isdigit() and (i < len(parts) - 1) and ('mib' in parts[i+1].lower() or 'gib' in parts[i+1].lower() or 'kib' in parts[i+1].lower()):
+                                    size_str = part + ' ' + parts[i+1]
+                                elif '~' in part:
+                                    size_str = part.split('~')[-1]
+                                elif '=' in part:
+                                    size_str = part.split('=')[-1]
+                                elif part.lower().startswith('filesize'):
+                                    size_str = part.lower().replace('filesize', '').replace('_approx', '').strip()
+
+                                if size_str:
+                                    clean_str = size_str.replace('~', '').strip()
+                                    num_part = ''
+                                    for c in clean_str:
+                                        if c.isdigit() or c == '.':
+                                            num_part += c
+                                        elif num_part:
+                                            break
+
+                                    if num_part:
+                                        size = float(num_part)
+                                        if 'gib' in size_str.lower() or 'g' in size_str.lower():
+                                            filesize = size * 1024
+                                        elif 'mib' in size_str.lower() or 'm' in size_str.lower():
+                                            filesize = size
+                                        elif 'kib' in size_str.lower() or 'k' in size_str.lower():
+                                            filesize = size / 1024
+                            except Exception as e:
+                                print(f"解析文件大小错误: {e}")
+                            break
+
+                    is_audio = 'm4a' in line.lower() or 'aac' in line.lower()
+                    if (resolution and resolution.endswith('p')) or is_audio:
+                        format_info = '音频/AAC' if is_audio else f'{resolution}/H.264'
+                        if fps:
+                            format_info += f'/{fps}fps'
+                        if filesize > 0:
+                            if filesize >= 1024:
+                                format_info += f'/{round(filesize/1024, 2)}GB'
+                            else:
+                                format_info += f'/{round(filesize, 1)}MB'
+                        else:
+                            try:
+                                size_match = re.search(r'~?\s*(\d+(\.\d+)?)\s*(G|M|K)i?B', line, re.IGNORECASE)
                                 if size_match:
                                     size = float(size_match.group(1))
                                     unit = size_match.group(3).upper()
                                     if unit == 'G':
-                                        filesize = size * 1024  # 转换为MB
-                                        print(f"通过正则表达式解析到GiB大小: {size}GiB = {filesize}MB")
+                                        format_info += f'/{round(size, 2)}GB'
                                     elif unit == 'M':
-                                        filesize = size
-                                        print(f"通过正则表达式解析到MiB大小: {size}MiB")
+                                        format_info += f'/{round(size, 1)}MB'
                                     elif unit == 'K':
-                                        filesize = size / 1024
-                                        print(f"通过正则表达式解析到KiB大小: {size}KiB = {filesize}MB")
+                                        format_info += f'/{round(size, 1)}KB'
                             except Exception as e:
-                                print(f"正则解析文件大小错误: {e}")
-                        
-                        # 解析视频流大小
-                        for i, part in enumerate(parts):
-                            # 检查当前部分或下一部分是否包含文件大小信息
-                            if ('filesize' in part.lower() or 'filesize_approx' in part.lower() or 
-                                'mib' in part.lower() or 'gib' in part.lower() or 'kib' in part.lower() or
-                                (i < len(parts) - 1 and ('mib' in parts[i+1].lower() or 'gib' in parts[i+1].lower() or 'kib' in parts[i+1].lower()))):
-                                try:
-                                    # 提取文件大小信息，处理多种格式
-                                    size_str = ''
-                                    
-                                    # 处理形如 "76.46MiB" 的格式
-                                    if 'mib' in part.lower() or 'gib' in part.lower() or 'kib' in part.lower():
-                                        size_str = part
-                                    # 处理形如 "~123.87MiB" 的格式
-                                    elif '~' in part and (i < len(parts) - 1) and ('mib' in parts[i+1].lower() or 'gib' in parts[i+1].lower() or 'kib' in parts[i+1].lower()):
-                                        size_str = part.replace('~', '') + ' ' + parts[i+1]
-                                    # 处理形如 "123.87 MiB" 的格式
-                                    elif part.replace('.', '', 1).isdigit() and (i < len(parts) - 1) and ('mib' in parts[i+1].lower() or 'gib' in parts[i+1].lower() or 'kib' in parts[i+1].lower()):
-                                        size_str = part + ' ' + parts[i+1]
-                                    # 处理其他格式
-                                    elif '~' in part:
-                                        size_str = part.split('~')[-1]
-                                    elif '=' in part:
-                                        size_str = part.split('=')[-1]
-                                    elif part.lower().startswith('filesize'):
-                                        size_str = part.lower().replace('filesize', '').replace('_approx', '').strip()
-                                    
-                                    if size_str:
-                                        # 提取数字部分，处理各种格式
-                                        # 先移除波浪号和空格
-                                        clean_str = size_str.replace('~', '').strip()
-                                        # 提取数字部分
-                                        num_part = ''
-                                        for c in clean_str:
-                                            if c.isdigit() or c == '.':
-                                                num_part += c
-                                            # 遇到第一个非数字非点的字符就停止
-                                            elif num_part:
-                                                break
-                                        
-                                        if num_part:
-                                            try:
-                                                size = float(num_part)
-                                                # 根据单位转换大小
-                                                if 'gib' in size_str.lower() or 'g' in size_str.lower():
-                                                    filesize = size * 1024  # 转换为MB
-                                                    print(f"解析到GiB大小: {size}GiB = {filesize}MB")
-                                                elif 'mib' in size_str.lower() or 'm' in size_str.lower():
-                                                    filesize = size
-                                                    print(f"解析到MiB大小: {size}MiB")
-                                                elif 'kib' in size_str.lower() or 'k' in size_str.lower():
-                                                    filesize = size / 1024
-                                                    print(f"解析到KiB大小: {size}KiB = {filesize}MB")
-                                            except Exception as e:
-                                                print(f"转换文件大小错误: {e}, 原始字符串: {size_str}, 提取数字: {num_part}")
-                                except Exception as e:
-                                    print(f"解析文件大小错误: {e}")
-                                break
-                        
-                        # 判断是否为音频格式
-                        is_audio = 'm4a' in line.lower() or 'aac' in line.lower()
-                        
-                        if (resolution and resolution.endswith('p')) or is_audio:
-                            if is_audio:
-                                format_info = "音频/AAC"
-                            else:
-                                format_info = f"{resolution}/H.264"
-                            if fps:
-                                format_info += f"/{fps}fps"
-                            if filesize > 0:
-                                if filesize >= 1024:
-                                    format_info += f"/{round(filesize/1024, 2)}GB"
-                                else:
-                                    format_info += f"/{round(filesize, 1)}MB"
-                            else:
-                                # 如果没有解析到文件大小，尝试在整行中查找
-                                try:
-                                    size_match = re.search(r'~?\s*(\d+(\.\d+)?)\s*(G|M|K)i?B', line, re.IGNORECASE)
-                                    if size_match:
-                                        size = float(size_match.group(1))
-                                        unit = size_match.group(3).upper()
-                                        if unit == 'G':
-                                            filesize = size * 1024  # 转换为MB
-                                            format_info += f"/{round(size, 2)}GB"
-                                            print(f"最后尝试解析到GiB大小: {size}GiB")
-                                        elif unit == 'M':
-                                            filesize = size
-                                            format_info += f"/{round(size, 1)}MB"
-                                            print(f"最后尝试解析到MiB大小: {size}MiB")
-                                        elif unit == 'K':
-                                            filesize = size / 1024
-                                            format_info += f"/{round(size, 1)}KB"
-                                            print(f"最后尝试解析到KiB大小: {size}KiB")
-                                except Exception as e:
-                                    print(f"最后尝试解析文件大小错误: {e}")
-                            # 打印调试信息
-                            print(f"添加格式: ID={format_id}, 信息={format_info}, 分辨率={resolution}, 帧率={fps}, 大小={filesize}MB")
-                            # 确保格式信息不重复添加
-                            format_exists = False
-                            for existing_id, existing_info in self.available_formats:
-                                if existing_id == format_id:
-                                    format_exists = True
-                                    break
-                            if not format_exists:
-                                self.available_formats.append((format_id, format_info))
-            
-            if not self.is_running:
+                                print(f"最后尝试解析文件大小错误: {e}")
+
+                        if not any(existing_id == format_id for existing_id, _ in self.available_formats):
+                            self.available_formats.append((format_id, format_info))
+
+        if not self.is_running:
+            if process.poll() is None:
                 process.terminate()
-                self.finished_signal.emit(False, '嗅探已取消', [])
-                return
-                
-            process.wait()
-            if process.returncode == 0:
-                if not self.available_formats:
-                    self.finished_signal.emit(False, '未找到可用的H.264视频格式', [])
+            return False, '嗅探已取消', []
+
+        process.wait()
+        if process.returncode == 0:
+            if not self.available_formats:
+                return False, '未找到可用的H.264视频格式', []
+
+            resolutions = {
+                '2160p': 2160,
+                '1440p': 1440,
+                '1080p': 1080,
+                '720p': 720,
+                '480p': 480,
+                '360p': 360,
+                '240p': 240,
+                '144p': 144,
+            }
+            self.available_formats.sort(key=lambda x: resolutions.get(x[1].split('/')[0], 0), reverse=True)
+            return True, '嗅探完成', self.available_formats
+
+        return False, '嗅探失败', []
+
+    def run(self):
+        try:
+            is_youtube = 'youtube.com' in self.url.lower() or 'youtu.be' in self.url.lower()
+            cookie_modes = ['none']
+            if is_youtube:
+                if self.parent().manual_cookie_enabled and os.path.exists(self.parent().cookie_file):
+                    cookie_modes = ['file']
+                else:
+                    cookie_modes = ['none', 'firefox']
+
+            last_message = '嗅探失败'
+            for cookie_mode in cookie_modes:
+                if is_youtube and cookie_mode == 'firefox':
+                    self.progress_signal.emit('普通嗅探失败，正在尝试调用 Firefox Cookies...')
+                success, message, formats = self.run_sniff(cookie_mode)
+                if success:
+                    self.finished_signal.emit(True, message, formats, cookie_mode)
                     return
-                    
-                # 按分辨率从大到小排序
-                resolutions = {
-                    '2160p': 2160,
-                    '1440p': 1440,
-                    '1080p': 1080,
-                    '720p': 720,
-                    '480p': 480,
-                    '360p': 360,
-                    '240p': 240,
-                    '144p': 144
-                }
-                
-                self.available_formats.sort(key=lambda x: resolutions.get(x[1].split('/')[0], 0), reverse=True)
-                self.finished_signal.emit(True, '嗅探完成', self.available_formats)
-            else:
-                self.finished_signal.emit(False, '嗅探失败', [])
+                last_message = message
+                if not self.is_running:
+                    self.finished_signal.emit(False, '嗅探已取消', [], cookie_mode)
+                    return
+
+            if is_youtube and not self.parent().manual_cookie_enabled:
+                self.finished_signal.emit(False, 'Firefox Cookies 调用失败，请手动输入 Cookies 后重试。', [], 'show_cookie_input')
+                return
+
+            self.finished_signal.emit(False, last_message, [], 'none')
         except Exception as e:
-            self.finished_signal.emit(False, f'嗅探时发生错误：{str(e)}', [])
+            self.finished_signal.emit(False, f'嗅探时发生错误：{str(e)}', [], 'none')
 
     def stop(self):
         self.is_running = False
+        if self.process and self.process.poll() is None:
+            self.process.terminate()
 
 class DownloadThread(QThread):
     progress_signal = pyqtSignal(str)
@@ -255,6 +239,7 @@ class DownloadThread(QThread):
         self.url = url
         self.format_id = format_id
         self.is_running = True
+        self.process = None
 
     def run(self):
         try:
@@ -262,27 +247,29 @@ class DownloadThread(QThread):
             # 检查是否为YouTube链接，只有YouTube链接才需要Cookies
             is_youtube = 'youtube.com' in self.url.lower() or 'youtu.be' in self.url.lower()
             
-            if is_youtube:
-                cmd = ['yt-dlp.exe', '-f', f'{self.format_id}+bestaudio[ext=m4a]', '--cookies', self.parent().cookie_file, '--merge-output-format', 'mp4', self.url, '--newline']
-            else:
-                cmd = ['yt-dlp.exe', '-f', f'{self.format_id}+bestaudio[ext=m4a]', '--merge-output-format', 'mp4', self.url, '--newline']
+            cmd = ['yt-dlp.exe', '-f', f'{self.format_id}+bestaudio[ext=m4a]']
+            if is_youtube and self.parent().cookie_mode == 'firefox':
+                cmd.extend(['--cookies-from-browser', 'firefox'])
+            elif is_youtube and self.parent().cookie_mode == 'file' and os.path.exists(self.parent().cookie_file):
+                cmd.extend(['--cookies', self.parent().cookie_file])
+            cmd.extend(['--merge-output-format', 'mp4', self.url, '--newline'])
             process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, creationflags=subprocess.CREATE_NO_WINDOW)
+            self.process = process
+            downloaded_file = None
             
             while self.is_running:
                 line = process.stdout.readline()
                 if not line:
                     break
-                self.progress_signal.emit(line.strip())
+                line = line.strip()
+                self.progress_signal.emit(line)
+                if '[download] Destination:' in line:
+                    downloaded_file = line.split(':', 1)[1].strip()
+                elif '[Merger] Merging formats into ' in line:
+                    downloaded_file = line.split('into ', 1)[1].strip().strip('"')
             
             process.wait()
             if process.returncode == 0:
-                # 获取下载的文件名
-                downloaded_file = None
-                for line in process.stdout.readlines():
-                    if '[download] Destination:' in line:
-                        downloaded_file = line.split(':', 1)[1].strip()
-                        break
-                
                 if downloaded_file and os.path.exists(downloaded_file):
                     # 获取文件大小
                     file_size = os.path.getsize(downloaded_file)
@@ -303,7 +290,7 @@ class DownloadThread(QThread):
                         new_name = f'{base_name}{file_size_str}{ext}'
                     elif ext.lower() == '.mp4':
                         # 视频文件：添加分辨率
-                        format_info = next((info for id, info in self.parent().format_id_map.items() if id == self.format_id), '')
+                        format_info = next((label for label, fmt_id in self.parent().format_id_map.items() if fmt_id == self.format_id), '')
                         resolution = format_info.split('/')[0] if format_info else ''
                         if resolution:
                             new_name = f'{base_name}.{resolution}{ext}'
@@ -326,6 +313,8 @@ class DownloadThread(QThread):
 
     def stop(self):
         self.is_running = False
+        if self.process and self.process.poll() is None:
+            self.process.terminate()
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -379,6 +368,8 @@ class MainWindow(QMainWindow):
         self.download_thread = None
         self.sniff_thread = None
         self.cookie_file = os.path.join(tempfile.gettempdir(), 'YouTube-Cookies.txt')
+        self.cookie_mode = 'none'
+        self.manual_cookie_enabled = False
         self.format_id_map = {}
         self.is_sniffing = False
 
@@ -422,8 +413,9 @@ class MainWindow(QMainWindow):
         cookie_input_layout.setContentsMargins(0, 0, 0, 0)
         cookie_label = QLabel('Cookies：')
         cookie_label.setFixedWidth(60)  # 与其他标签保持相同宽度
-        self.cookie_input = QLineEdit()
-        self.cookie_input.setPlaceholderText('在此输入Netscape格式Cookies，报错后马上更新！')
+        self.cookie_input = QPlainTextEdit()
+        self.cookie_input.setPlaceholderText('在此粘贴 Netscape 格式 Cookies，多行原样保存。')
+        self.cookie_input.setFixedHeight(96)
         self.cookie_input.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.cookie_input.customContextMenuRequested.connect(self.show_context_menu)
         save_cookie_button = QPushButton('更新')
@@ -473,7 +465,7 @@ class MainWindow(QMainWindow):
             # 启动嗅探线程
             if self.sniff_thread and self.sniff_thread.isRunning():
                 self.sniff_thread.stop()
-                self.sniff_thread.wait()
+                self.sniff_thread.wait(1000)
                 
             self.sniff_thread = SniffThread(url, self)
             self.sniff_thread.progress_signal.connect(self.update_progress)
@@ -491,7 +483,7 @@ class MainWindow(QMainWindow):
         # 停止当前下载线程（如果有）
         if self.download_thread and self.download_thread.isRunning():
             self.download_thread.stop()
-            self.download_thread.wait()
+            self.download_thread.wait(1000)
 
         self.download_button.setText('正在下载中')
         self.download_button.setEnabled(False)  # 设置按钮为不可用状态
@@ -504,12 +496,14 @@ class MainWindow(QMainWindow):
     def update_progress(self, text):
         self.progress_text.setText(text)
 
-    def sniff_finished(self, success, message, formats):
+    def sniff_finished(self, success, message, formats, cookie_mode):
         self.is_sniffing = False
         self.download_button.setText('开始嗅探')
         self.download_button.setEnabled(True)  # 恢复按钮为可用状态
         
         if success and formats:
+            self.cookie_mode = cookie_mode
+            self.cookie_container.hide()
             self.progress_text.setText('H.264视频嗅探完成')
             # 清空并更新格式选择框
             self.format_combo.clear()
@@ -531,7 +525,11 @@ class MainWindow(QMainWindow):
             self.format_combo.clear()
             self.format_id_map.clear()
             
-            if not success:
+            if cookie_mode == 'show_cookie_input':
+                self.cookie_container.show()
+                self.cookie_mode = 'none'
+                QMessageBox.warning(self, '错误', message)
+            elif not success:
                 QMessageBox.warning(self, '错误', message)
             elif not formats:
                 QMessageBox.warning(self, '警告', '未找到H.264视频格式')
@@ -624,13 +622,11 @@ class MainWindow(QMainWindow):
         about_box.exec()
 
     def check_youtube_url(self):
-        url = self.url_input.text().strip()
-        is_youtube = 'youtube.com' in url.lower() or 'youtu.be' in url.lower()
-        self.cookie_container.setVisible(is_youtube)
+        self.cookie_container.hide()
 
     def save_cookie(self):
         try:
-            cookie_content = self.cookie_input.text().strip()
+            cookie_content = self.cookie_input.toPlainText().strip()
             if not cookie_content:
                 QMessageBox.warning(self, '警告', '请输入Cookies内容')
                 return
@@ -638,7 +634,10 @@ class MainWindow(QMainWindow):
             with open(self.cookie_file, 'w', encoding='utf-8') as f:
                 f.write(cookie_content)
             
-            QMessageBox.information(self, '成功', 'Cookies已更新！')
+            self.manual_cookie_enabled = True
+            self.cookie_mode = 'file'
+            self.cookie_container.hide()
+            QMessageBox.information(self, '成功', 'Cookies已更新，请重新点击开始嗅探。')
             self.cookie_input.clear()
         except Exception as e:
             QMessageBox.warning(self, '警告', f'Cookies更新失败：{str(e)}')
@@ -647,7 +646,10 @@ class MainWindow(QMainWindow):
         # 获取触发右键菜单的控件
         sender = self.sender()
         # 如果输入框有内容，先全选
-        if sender.text():
+        if hasattr(sender, 'toPlainText'):
+            if sender.toPlainText():
+                sender.selectAll()
+        elif sender.text():
             sender.selectAll()
         menu = QMenu(self)
         cut_action = menu.addAction('剪切')
@@ -702,17 +704,19 @@ class MainWindow(QMainWindow):
         # 清空格式选择框和相关状态
         self.format_combo.clear()
         self.format_id_map.clear()
+        self.cookie_mode = 'none'
+        self.cookie_container.hide()
         self.download_button.setText('开始嗅探')
         self.progress_text.setText('准备就绪')
         
         # 如果正在进行嗅探或下载，停止它们
         if self.sniff_thread and self.sniff_thread.isRunning():
             self.sniff_thread.stop()
-            self.sniff_thread.wait()
+            self.sniff_thread.wait(1000)
         
         if self.download_thread and self.download_thread.isRunning():
             self.download_thread.stop()
-            self.download_thread.wait()
+            self.download_thread.wait(1000)
         
         self.download_button.setEnabled(True)
         self.is_sniffing = False
