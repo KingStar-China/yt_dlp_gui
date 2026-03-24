@@ -319,7 +319,7 @@ class DownloadThread(QThread):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle('yt_dlp_gui v1.0.2 @少昊金天氏')
+        self.setWindowTitle('yt_dlp_gui v1.0.3 @少昊金天氏')
         self.setMinimumSize(533, 400)
         # 在Windows 10/11上设置深色标题栏
         # 导入必要的模块
