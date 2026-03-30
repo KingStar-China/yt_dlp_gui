@@ -8,3 +8,5 @@
 yt-dlp.exe
 *.zip
 /release/
+*.mp3
+ffmpeg.exe

@@ -40,6 +40,21 @@ def resolve_ytdlp_command():
 
     return managed_path
 
+def get_managed_ffmpeg_path():
+    return os.path.join(get_runtime_dir(), 'ffmpeg.exe')
+
+
+def resolve_ffmpeg_command():
+    managed_path = get_managed_ffmpeg_path()
+    if os.path.exists(managed_path):
+        return managed_path
+
+    path_cmd = shutil.which('ffmpeg.exe') or shutil.which('ffmpeg')
+    if path_cmd:
+        return path_cmd
+
+    return managed_path
+
 class SniffThread(QThread):
     progress_signal = pyqtSignal(str)
     finished_signal = pyqtSignal(bool, str, list, str)
@@ -468,7 +483,7 @@ class UpdateYtDlpThread(QThread):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle('yt_dlp_gui v1.0.5 @少昊金天氏')
+        self.setWindowTitle('yt_dlp_gui v1.0.6 @少昊金天氏')
         self.setMinimumSize(533, 400)
         # 在Windows 10/11上设置深色标题栏
         # 导入必要的模块
@@ -519,6 +534,7 @@ class MainWindow(QMainWindow):
         self.update_thread = None
         self.cookie_file = os.path.join(tempfile.gettempdir(), 'YouTube-Cookies.txt')
         self.ytdlp_path = resolve_ytdlp_command()
+        self.ffmpeg_path = resolve_ffmpeg_command()
         self.cookie_mode = 'none'
         self.manual_cookie_enabled = False
         self.format_id_map = {}
@@ -605,6 +621,14 @@ class MainWindow(QMainWindow):
         self.ytdlp_path = resolve_ytdlp_command()
         return self.ytdlp_path
 
+    def get_ffmpeg_command(self):
+        self.ffmpeg_path = resolve_ffmpeg_command()
+        return self.ffmpeg_path
+
+    def has_ffmpeg(self):
+        ffmpeg_cmd = self.get_ffmpeg_command()
+        return bool(ffmpeg_cmd and os.path.exists(ffmpeg_cmd)) or bool(shutil.which('ffmpeg.exe') or shutil.which('ffmpeg'))
+
     def update_ytdlp(self):
         target_path = get_managed_ytdlp_path()
         self.update_ytdlp_button.setEnabled(False)
@@ -657,6 +681,11 @@ class MainWindow(QMainWindow):
             return
             
         format_id = self.format_id_map[self.format_combo.currentText()]
+
+        if not format_id.startswith('subtitle:') and not self.has_ffmpeg():
+            QMessageBox.warning(self, '错误', '未找到 FFmpeg。请把 ffmpeg.exe 放到程序根目录，或安装 FFmpeg 并加入 PATH。')
+            self.progress_text.setText('缺少 FFmpeg，无法合并视频和音频')
+            return
         
         # 停止当前下载线程（如果有）
         if self.download_thread and self.download_thread.isRunning():
@@ -726,7 +755,7 @@ class MainWindow(QMainWindow):
         # 创建自定义的关于对话框
         about_box = QMessageBox(self)
         about_box.setWindowTitle('关于')
-        about_box.setText('基于yt-dlp的视频下载工具\n为了兼容我只允许它下载H.264\n主要下载YouTube和bilibili视频\n\n作者：@少昊金天氏\n\n更新时间：2026-03-29')
+        about_box.setText('基于yt-dlp的视频下载工具\n为了兼容我只允许它下载H.264\n主要下载YouTube和bilibili视频\n\n作者：@少昊金天氏\n\n更新时间：2026-03-30')
         about_box.setIcon(QMessageBox.Icon.Information)
         
         # 设置对话框的深色标题栏
@@ -1055,9 +1084,9 @@ def main():
     
         
         
-        # 设置环境变量，确保FFmpeg能找到DLL文件
-        os.environ['PATH'] = os.path.dirname(os.path.abspath(__file__)) + os.pathsep + \
-                            dll_dir + os.pathsep + os.environ.get('PATH', '')
+        # 优先让程序根目录和 dll 目录参与 PATH，便于找到 ffmpeg.exe / 相关 DLL
+        runtime_dir = get_runtime_dir()
+        os.environ['PATH'] = runtime_dir + os.pathsep + dll_dir + os.pathsep + os.environ.get('PATH', '')
 
         window = MainWindow()
         window.show()
