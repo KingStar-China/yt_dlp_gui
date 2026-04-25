@@ -14,6 +14,7 @@ import gzip
 import zlib
 import hashlib
 import random
+from http.cookiejar import MozillaCookieJar
 try:
     import requests
 except ImportError:
@@ -154,6 +155,14 @@ def build_bilibili_mixin_key(img_url, sub_url):
     if len(lookup) < 64:
         return ''
     return ''.join(lookup[index] for index in mixin_key_enc_tab)[:32]
+
+
+def load_cookie_jar_from_file(cookie_file):
+    if not cookie_file or not os.path.exists(cookie_file):
+        return None
+    cookie_jar = MozillaCookieJar()
+    cookie_jar.load(cookie_file, ignore_discard=True, ignore_expires=True)
+    return cookie_jar
 
 
 def get_codec_label_and_priority(codec_name):
@@ -360,7 +369,24 @@ class SniffThread(QThread):
         self.add_subtitle_group(info.get('subtitles'), 'manual')
         self.add_subtitle_group(info.get('automatic_captions'), 'auto')
 
-    def fetch_bilibili_page_data(self):
+    def apply_requests_cookies(self, session, cookie_mode):
+        if session is None:
+            return
+
+        if cookie_mode == 'file':
+            cookie_jar = load_cookie_jar_from_file(self.parent().cookie_file)
+            if cookie_jar is not None:
+                session.cookies.update(cookie_jar)
+            return
+
+        if cookie_mode == 'browser:firefox':
+            if not os.path.exists(self.parent().cookie_file):
+                return
+            cookie_jar = load_cookie_jar_from_file(self.parent().cookie_file)
+            if cookie_jar is not None:
+                session.cookies.update(cookie_jar)
+
+    def fetch_bilibili_page_data(self, cookie_mode):
         headers = {
             'User-Agent': BILIBILI_WEB_UA,
             'Referer': 'https://www.bilibili.com/',
@@ -368,6 +394,7 @@ class SniffThread(QThread):
         session = None
         if requests is not None:
             session = requests.Session()
+            self.apply_requests_cookies(session, cookie_mode)
             response = session.get(self.url, headers=headers, timeout=20)
             response.raise_for_status()
             html = response.text
@@ -525,12 +552,12 @@ class SniffThread(QThread):
                         return None
         return None
 
-    def run_bilibili_webpage_sniff(self):
+    def run_bilibili_webpage_sniff(self, cookie_mode):
         self.progress_signal.emit('yt-dlp 被 B站 412 拦截，正在尝试网页直连嗅探...')
         self.available_formats = []
         self.subtitle_entries = []
 
-        playinfo, initial_state = self.fetch_bilibili_page_data()
+        playinfo, initial_state = self.fetch_bilibili_page_data(cookie_mode)
         playinfo_data = playinfo.get('data') or {}
         dash = playinfo_data.get('dash') or {}
         videos = dash.get('video') or []
@@ -691,7 +718,7 @@ class SniffThread(QThread):
 
         combined_error = '\n'.join(part for part in [error_output, output] if part).strip()
         if site == 'bilibili' and ('HTTP Error 412' in combined_error or 'Precondition Failed' in combined_error):
-            return self.run_bilibili_webpage_sniff()
+            return self.run_bilibili_webpage_sniff(cookie_mode)
 
         return False, self.normalize_error_message(site, combined_error), []
 
