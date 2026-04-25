@@ -864,23 +864,32 @@ class SniffThread(QThread):
             self.cookie_warning_message = ''
             self.cookie_required_message = ''
             site = detect_site(self.url)
+            browser_cookie_modes = ['browser:firefox', 'browser:edge', 'browser:chrome']
             cookie_modes = ['none']
             if site == 'youtube':
                 if self.parent().manual_cookie_enabled and os.path.exists(self.parent().cookie_file):
-                    cookie_modes = ['file']
+                    cookie_modes = ['file'] + browser_cookie_modes + ['none']
                 else:
-                    cookie_modes = ['none', 'browser:firefox']
+                    cookie_modes = browser_cookie_modes + ['none']
             elif site == 'bilibili':
                 if self.parent().manual_cookie_enabled and os.path.exists(self.parent().cookie_file):
-                    cookie_modes = ['file', 'browser:firefox', 'browser:edge', 'browser:chrome', 'none']
+                    cookie_modes = ['file'] + browser_cookie_modes + ['none']
                 else:
-                    cookie_modes = ['browser:firefox', 'browser:edge', 'browser:chrome', 'none']
+                    cookie_modes = browser_cookie_modes + ['none']
+            else:
+                if self.parent().manual_cookie_enabled and os.path.exists(self.parent().cookie_file):
+                    cookie_modes = ['file', 'none'] + browser_cookie_modes
+                else:
+                    cookie_modes = ['none'] + browser_cookie_modes
 
             last_message = '嗅探失败'
-            for cookie_mode in cookie_modes:
+            for index, cookie_mode in enumerate(cookie_modes):
                 if cookie_mode.startswith('browser:'):
                     browser_name = cookie_mode.split(':', 1)[1].capitalize()
-                    self.progress_signal.emit(f'普通嗅探失败，正在尝试调用 {browser_name} Cookies...')
+                    if index == 0:
+                        self.progress_signal.emit(f'正在尝试调用 {browser_name} Cookies...')
+                    else:
+                        self.progress_signal.emit(f'普通嗅探失败，正在尝试调用 {browser_name} Cookies...')
                 success, message, formats = self.run_sniff(
                     cookie_mode,
                     allow_bilibili_web_fallback=(site != 'bilibili'),
