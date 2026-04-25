@@ -815,7 +815,7 @@ class SniffThread(QThread):
             return error_text.strip().splitlines()[-1]
         return '嗅探失败'
 
-    def run_sniff(self, cookie_mode):
+    def run_sniff(self, cookie_mode, allow_bilibili_web_fallback=True):
         self.available_formats = []
         self.subtitle_entries = []
         self.cookie_warning_message = ''
@@ -854,7 +854,7 @@ class SniffThread(QThread):
             return True, '嗅探完成', combined_formats
 
         combined_error = '\n'.join(part for part in [error_output, output] if part).strip()
-        if site == 'bilibili' and ('HTTP Error 412' in combined_error or 'Precondition Failed' in combined_error):
+        if allow_bilibili_web_fallback and site == 'bilibili' and ('HTTP Error 412' in combined_error or 'Precondition Failed' in combined_error):
             return self.run_bilibili_webpage_sniff(cookie_mode)
 
         return False, self.normalize_error_message(site, combined_error), []
@@ -872,16 +872,19 @@ class SniffThread(QThread):
                     cookie_modes = ['none', 'browser:firefox']
             elif site == 'bilibili':
                 if self.parent().manual_cookie_enabled and os.path.exists(self.parent().cookie_file):
-                    cookie_modes = ['file']
+                    cookie_modes = ['file', 'browser:firefox', 'browser:edge', 'browser:chrome', 'none']
                 else:
-                    cookie_modes = ['none', 'browser:firefox', 'browser:edge', 'browser:chrome']
+                    cookie_modes = ['browser:firefox', 'browser:edge', 'browser:chrome', 'none']
 
             last_message = '嗅探失败'
             for cookie_mode in cookie_modes:
                 if cookie_mode.startswith('browser:'):
                     browser_name = cookie_mode.split(':', 1)[1].capitalize()
                     self.progress_signal.emit(f'普通嗅探失败，正在尝试调用 {browser_name} Cookies...')
-                success, message, formats = self.run_sniff(cookie_mode)
+                success, message, formats = self.run_sniff(
+                    cookie_mode,
+                    allow_bilibili_web_fallback=(site != 'bilibili'),
+                )
                 if success:
                     self.finished_signal.emit(True, message, formats, cookie_mode)
                     return
@@ -889,6 +892,13 @@ class SniffThread(QThread):
                 if not self.is_running:
                     self.finished_signal.emit(False, '嗅探已取消', [], cookie_mode)
                     return
+
+            if site == 'bilibili':
+                success, message, formats = self.run_bilibili_webpage_sniff('none')
+                if success:
+                    self.finished_signal.emit(True, message, formats, 'none')
+                    return
+                last_message = message
 
             if site == 'youtube' and not self.parent().manual_cookie_enabled:
                 self.finished_signal.emit(False, '嗅探失败，需要火狐登录或者手动填写Cookie。', [], 'show_cookie_input')
