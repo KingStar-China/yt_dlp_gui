@@ -9,6 +9,12 @@ import tempfile
 import shutil
 import urllib.request
 import json
+import gzip
+import zlib
+try:
+    import requests
+except ImportError:
+    requests = None
 
 # 导入Qt相关模块
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
@@ -55,6 +61,62 @@ def resolve_ffmpeg_command():
 
     return managed_path
 
+
+BILIBILI_WEB_UA = (
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+    '(KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36'
+)
+
+
+def detect_site(url):
+    lower_url = (url or '').lower()
+    if 'youtube.com' in lower_url or 'youtu.be' in lower_url:
+        return 'youtube'
+    if 'bilibili.com' in lower_url or 'b23.tv' in lower_url:
+        return 'bilibili'
+    return 'other'
+
+
+def get_cookie_args(cookie_mode, cookie_file):
+    if cookie_mode == 'file' and os.path.exists(cookie_file):
+        return ['--cookies', cookie_file]
+    if cookie_mode == 'firefox':
+        return ['--cookies-from-browser', 'firefox']
+    if cookie_mode.startswith('browser:'):
+        return ['--cookies-from-browser', cookie_mode.split(':', 1)[1]]
+    return []
+
+
+def format_size_from_bytes(filesize):
+    if not filesize:
+        return ''
+    if filesize >= 1024 * 1024 * 1024:
+        return f'{round(filesize / (1024 * 1024 * 1024), 2)}GB'
+    if filesize >= 1024 * 1024:
+        return f'{round(filesize / (1024 * 1024), 1)}MB'
+    if filesize >= 1024:
+        return f'{round(filesize / 1024, 1)}KB'
+    return f'{filesize}B'
+
+
+def sanitize_filename(filename):
+    sanitized = re.sub(r'[<>:"/\\|?*]', '_', (filename or '').strip())
+    sanitized = sanitized.rstrip(' .')
+    return sanitized or 'video'
+
+
+def ensure_unique_path(file_path):
+    if not os.path.exists(file_path):
+        return file_path
+
+    base_name, ext = os.path.splitext(file_path)
+    index = 1
+    while True:
+        candidate = f'{base_name} ({index}){ext}'
+        if not os.path.exists(candidate):
+            return candidate
+        index += 1
+
 class SniffThread(QThread):
     progress_signal = pyqtSignal(str)
     finished_signal = pyqtSignal(bool, str, list, str)
@@ -69,203 +131,329 @@ class SniffThread(QThread):
         self.subtitle_process = None
 
     def build_sniff_cmd(self, cookie_mode):
-        cmd = [self.parent().get_ytdlp_command(), '-F']
-        if cookie_mode == 'firefox':
-            cmd.extend(['--cookies-from-browser', 'firefox'])
-        elif cookie_mode == 'file':
-            cmd.extend(['--cookies', self.parent().cookie_file])
-        cmd.extend([self.url, '--newline'])
-        return cmd
-
-    def build_subtitle_cmd(self, cookie_mode):
-        cmd = [self.parent().get_ytdlp_command(), '--list-subs']
-        if cookie_mode == 'firefox':
-            cmd.extend(['--cookies-from-browser', 'firefox'])
-        elif cookie_mode == 'file':
-            cmd.extend(['--cookies', self.parent().cookie_file])
+        cmd = [
+            self.parent().get_ytdlp_command(),
+            '--dump-single-json',
+            '--no-warnings',
+            '--no-playlist',
+        ]
+        cmd.extend(get_cookie_args(cookie_mode, self.parent().cookie_file))
         cmd.append(self.url)
         return cmd
 
-    def collect_subtitles(self, cookie_mode):
-        process = subprocess.Popen(
-            self.build_subtitle_cmd(cookie_mode),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            creationflags=subprocess.CREATE_NO_WINDOW,
-        )
-        self.subtitle_process = process
-        output, _ = process.communicate()
-        self.subtitle_process = None
-        if process.returncode != 0:
-            return
+    def parse_info_json(self, output):
+        text = (output or '').strip()
+        if not text:
+            return None
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            for line in reversed(text.splitlines()):
+                line = line.strip()
+                if not line.startswith('{'):
+                    continue
+                try:
+                    return json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+        return None
 
-        for raw_line in output.splitlines():
-            line = raw_line.strip()
-            subtitle_match = re.match(r'^([a-zA-Z0-9_-]+)\s+(.*)$', line)
-            if not subtitle_match:
-                continue
-            subtitle_lang = subtitle_match.group(1)
-            subtitle_note = subtitle_match.group(2).strip()
-            if subtitle_lang.lower() in {'language', 'code', 'name'}:
-                continue
-            if not re.search(r'(vtt|ttml|srv\d|json3|srt|ass)', subtitle_note, re.IGNORECASE):
+    def get_resolution_label(self, fmt):
+        height = fmt.get('height')
+        if isinstance(height, (int, float)) and height:
+            return f'{int(height)}p'
+
+        resolution = str(fmt.get('resolution') or '')
+        if resolution:
+            match = re.search(r'(\d{3,4})p', resolution, re.IGNORECASE)
+            if match:
+                return f'{match.group(1)}p'
+            match = re.search(r'(\d{3,4})x(\d{3,4})', resolution)
+            if match:
+                return f'{match.group(2)}p'
+        return None
+
+    def add_subtitle_group(self, subtitle_map, mode):
+        for subtitle_lang, entries in (subtitle_map or {}).items():
+            if not entries:
                 continue
 
-            subtitle_kind = '自动字幕' if 'auto' in subtitle_note.lower() else '字幕'
-            subtitle_id = f'subtitle:{subtitle_lang}:{"auto" if "auto" in subtitle_note.lower() else "manual"}'
+            exts = []
+            for entry in entries:
+                ext = str(entry.get('ext') or '').strip()
+                if ext and ext not in exts:
+                    exts.append(ext)
+
+            subtitle_id = f'subtitle:{subtitle_lang}:{mode}'
+            subtitle_kind = '自动字幕' if mode == 'auto' else '字幕'
             subtitle_info = f'{subtitle_kind}/{subtitle_lang}'
-            if subtitle_note:
-                subtitle_info += f'/{subtitle_note}'
+            if exts:
+                subtitle_info += f"/{','.join(exts)}"
             if not any(existing_id == subtitle_id for existing_id, _ in self.subtitle_entries):
                 self.subtitle_entries.append((subtitle_id, subtitle_info))
+
+    def populate_formats_from_info(self, info):
+        self.available_formats = []
+        self.subtitle_entries = []
+
+        for fmt in info.get('formats') or []:
+            format_id = str(fmt.get('format_id') or '').strip()
+            if not format_id:
+                continue
+
+            vcodec = str(fmt.get('vcodec') or '').lower()
+            acodec = str(fmt.get('acodec') or '').lower()
+            ext = str(fmt.get('ext') or '').lower()
+            resolution = self.get_resolution_label(fmt)
+            fps = fmt.get('fps')
+            filesize = fmt.get('filesize') or fmt.get('filesize_approx') or 0
+
+            is_audio = vcodec == 'none' and acodec != 'none'
+            is_aac_audio = any(token in acodec for token in ('aac', 'mp4a')) or ext in {'m4a', 'aac'}
+            is_h264_video = vcodec != 'none' and any(token in vcodec for token in ('avc1', 'h264'))
+
+            if is_audio:
+                if not is_aac_audio:
+                    continue
+                format_info = '音频/AAC'
+            elif is_h264_video and resolution:
+                format_info = f'{resolution}/H.264'
+            else:
+                continue
+
+            try:
+                if fps:
+                    format_info += f'/{int(round(float(fps)))}fps'
+            except Exception:
+                pass
+
+            size_label = format_size_from_bytes(filesize)
+            if size_label:
+                format_info += f'/{size_label}'
+
+            if not any(existing_id == format_id for existing_id, _ in self.available_formats):
+                self.available_formats.append((format_id, format_info))
+
+        self.add_subtitle_group(info.get('subtitles'), 'manual')
+        self.add_subtitle_group(info.get('automatic_captions'), 'auto')
+
+    def fetch_bilibili_page_data(self):
+        headers = {
+            'User-Agent': BILIBILI_WEB_UA,
+            'Referer': 'https://www.bilibili.com/',
+        }
+        if requests is not None:
+            response = requests.get(self.url, headers=headers, timeout=20)
+            response.raise_for_status()
+            html = response.text
+        else:
+            request = urllib.request.Request(self.url, headers=headers)
+            with urllib.request.urlopen(request, timeout=20) as response:
+                raw_data = response.read()
+                content_encoding = str(response.headers.get('Content-Encoding') or '').lower()
+                if content_encoding == 'gzip':
+                    raw_data = gzip.decompress(raw_data)
+                elif content_encoding == 'deflate':
+                    raw_data = zlib.decompress(raw_data)
+                html = raw_data.decode('utf-8', errors='ignore')
+
+        playinfo = self.extract_embedded_json(html, 'window.__playinfo__=')
+        initial_state = self.extract_embedded_json(html, 'window.__INITIAL_STATE__=')
+        if not playinfo:
+            raise ValueError('B站页面里没找到 __playinfo__')
+        return playinfo, initial_state
+
+    def extract_embedded_json(self, html, marker):
+        start = html.find(marker)
+        if start < 0:
+            return None
+
+        start = html.find('{', start)
+        if start < 0:
+            return None
+
+        depth = 0
+        in_string = False
+        escape = False
+
+        for index in range(start, len(html)):
+            char = html[index]
+
+            if in_string:
+                if escape:
+                    escape = False
+                elif char == '\\':
+                    escape = True
+                elif char == '"':
+                    in_string = False
+                continue
+
+            if char == '"':
+                in_string = True
+            elif char == '{':
+                depth += 1
+            elif char == '}':
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(html[start:index + 1])
+                    except json.JSONDecodeError:
+                        return None
+        return None
+
+    def run_bilibili_webpage_sniff(self):
+        self.progress_signal.emit('yt-dlp 被 B站 412 拦截，正在尝试网页直连嗅探...')
+        self.available_formats = []
+        self.subtitle_entries = []
+
+        playinfo, initial_state = self.fetch_bilibili_page_data()
+        playinfo_data = playinfo.get('data') or {}
+        dash = playinfo_data.get('dash') or {}
+        videos = dash.get('video') or []
+        audios = dash.get('audio') or []
+
+        title = (
+            ((initial_state.get('videoData') or {}).get('title'))
+            or (initial_state.get('h1Title'))
+            or 'bilibili_video'
+        )
+        page_url = self.url
+        download_payloads = {}
+
+        preferred_audio = None
+        for index, audio in enumerate(audios):
+            audio_codec = str(audio.get('codecs') or '').lower()
+            if 'mp4a' not in audio_codec and 'aac' not in audio_codec:
+                continue
+            audio_url = audio.get('baseUrl') or audio.get('base_url') or audio.get('url')
+            if not audio_url:
+                continue
+            audio_entry = {
+                'type': 'bilibili_direct_audio',
+                'title': title,
+                'audio_url': audio_url,
+                'audio_ext': 'm4a',
+                'audio_codec': audio.get('codecs'),
+                'filesize': audio.get('size') or 0,
+                'headers': {
+                    'User-Agent': BILIBILI_WEB_UA,
+                    'Referer': page_url,
+                },
+            }
+            if preferred_audio is None or (audio.get('bandwidth') or 0) > (preferred_audio.get('bandwidth') or 0):
+                preferred_audio = {
+                    'index': index,
+                    'bandwidth': audio.get('bandwidth') or 0,
+                    'payload': audio_entry,
+                }
+
+        if preferred_audio:
+            audio_format_id = f'bili-direct-audio:{preferred_audio["index"]}'
+            format_info = '音频/AAC'
+            size_label = format_size_from_bytes(preferred_audio['payload'].get('filesize'))
+            if size_label:
+                format_info += f'/{size_label}'
+            self.available_formats.append((audio_format_id, format_info))
+            download_payloads[audio_format_id] = preferred_audio['payload']
+
+        for index, video in enumerate(videos):
+            video_codec = str(video.get('codecs') or '').lower()
+            if not any(token in video_codec for token in ('avc1', 'h264')):
+                continue
+
+            video_url = video.get('baseUrl') or video.get('base_url') or video.get('url')
+            if not video_url:
+                continue
+
+            height = video.get('height')
+            if not height:
+                continue
+            resolution = f'{int(height)}p'
+            format_id = f'bili-direct-video:{index}'
+            format_info = f'{resolution}/H.264'
+
+            try:
+                fps = float(video.get('frameRate') or video.get('frame_rate') or 0)
+                if fps:
+                    format_info += f'/{int(round(fps))}fps'
+            except Exception:
+                pass
+
+            size_label = format_size_from_bytes(video.get('size') or 0)
+            if size_label:
+                format_info += f'/{size_label}'
+
+            self.available_formats.append((format_id, format_info))
+            download_payloads[format_id] = {
+                'type': 'bilibili_direct_video',
+                'title': title,
+                'video_url': video_url,
+                'audio_url': preferred_audio['payload']['audio_url'] if preferred_audio else None,
+                'video_ext': 'mp4',
+                'audio_ext': 'm4a',
+                'resolution': resolution,
+                'headers': {
+                    'User-Agent': BILIBILI_WEB_UA,
+                    'Referer': page_url,
+                },
+            }
+
+        if not self.available_formats:
+            return False, 'B站网页已打开，但没解析到可直连的 H.264/AAC 格式', []
+
+        self.parent().set_direct_download_payloads(download_payloads)
+        resolutions = {
+            '2160p': 2160,
+            '1440p': 1440,
+            '1080p': 1080,
+            '720p': 720,
+            '480p': 480,
+            '360p': 360,
+            '240p': 240,
+            '144p': 144,
+        }
+        self.available_formats.sort(key=lambda x: resolutions.get(x[1].split('/')[0], 0), reverse=True)
+        return True, 'B站网页直连嗅探完成', self.available_formats
+
+    def normalize_error_message(self, site, error_text):
+        lowered = (error_text or '').lower()
+        if site == 'bilibili' and ('http error 412' in lowered or 'precondition failed' in lowered):
+            return 'B站接口返回 412，已尝试常规嗅探'
+        if 'sign in' in lowered or 'login' in lowered:
+            return '目标站点需要登录态或 Cookies'
+        if error_text:
+            return error_text.strip().splitlines()[-1]
+        return '嗅探失败'
 
     def run_sniff(self, cookie_mode):
         self.available_formats = []
         self.subtitle_entries = []
+        self.parent().set_direct_download_payloads({})
+        site = detect_site(self.url)
         process = subprocess.Popen(
             self.build_sniff_cmd(cookie_mode),
             stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
+            stderr=subprocess.PIPE,
             text=True,
             creationflags=subprocess.CREATE_NO_WINDOW,
         )
         self.process = process
-
-        while self.is_running:
-            line = process.stdout.readline()
-            if not line:
-                break
-            self.progress_signal.emit(line.strip())
-
-            if 'avc1' in line.lower() or 'h264' in line.lower() or 'm4a' in line.lower() or 'aac' in line.lower():
-                parts = line.split()
-                if len(parts) >= 3:
-                    format_id = parts[0]
-                    resolution = None
-                    fps = None
-                    filesize = 0
-
-                    for part in parts:
-                        if 'x' in part and part[0].isdigit():
-                            resolution = part.split('x')[1] + 'p'
-                            break
-
-                    for part in parts:
-                        if 'fps' in part.lower():
-                            try:
-                                fps_str = part.lower()
-                                fps_val = ''.join([c for c in fps_str if c.isdigit() or c == '.'])
-                                if fps_val:
-                                    fps = int(float(fps_val))
-                                    print(f"成功解析帧率: {fps}fps")
-                            except Exception as e:
-                                print(f"解析帧率错误: {e}")
-                            break
-
-                    if fps is None:
-                        try:
-                            fps_match = re.search(r'(\d+(\.\d+)?)\s*fps', line.lower())
-                            if fps_match:
-                                fps = int(float(fps_match.group(1)))
-                                print(f"通过正则表达式解析帧率: {fps}fps")
-                        except Exception as e:
-                            print(f"正则解析帧率错误: {e}")
-
-                    if filesize == 0:
-                        try:
-                            size_match = re.search(r'(\d+(\.\d+)?)\s*(G|M|K)iB', line, re.IGNORECASE)
-                            if size_match:
-                                size = float(size_match.group(1))
-                                unit = size_match.group(3).upper()
-                                if unit == 'G':
-                                    filesize = size * 1024
-                                elif unit == 'M':
-                                    filesize = size
-                                elif unit == 'K':
-                                    filesize = size / 1024
-                        except Exception as e:
-                            print(f"正则解析文件大小错误: {e}")
-
-                    for i, part in enumerate(parts):
-                        if ('filesize' in part.lower() or 'filesize_approx' in part.lower() or
-                            'mib' in part.lower() or 'gib' in part.lower() or 'kib' in part.lower() or
-                            (i < len(parts) - 1 and ('mib' in parts[i+1].lower() or 'gib' in parts[i+1].lower() or 'kib' in parts[i+1].lower()))):
-                            try:
-                                size_str = ''
-                                if 'mib' in part.lower() or 'gib' in part.lower() or 'kib' in part.lower():
-                                    size_str = part
-                                elif '~' in part and (i < len(parts) - 1) and ('mib' in parts[i+1].lower() or 'gib' in parts[i+1].lower() or 'kib' in parts[i+1].lower()):
-                                    size_str = part.replace('~', '') + ' ' + parts[i+1]
-                                elif part.replace('.', '', 1).isdigit() and (i < len(parts) - 1) and ('mib' in parts[i+1].lower() or 'gib' in parts[i+1].lower() or 'kib' in parts[i+1].lower()):
-                                    size_str = part + ' ' + parts[i+1]
-                                elif '~' in part:
-                                    size_str = part.split('~')[-1]
-                                elif '=' in part:
-                                    size_str = part.split('=')[-1]
-                                elif part.lower().startswith('filesize'):
-                                    size_str = part.lower().replace('filesize', '').replace('_approx', '').strip()
-
-                                if size_str:
-                                    clean_str = size_str.replace('~', '').strip()
-                                    num_part = ''
-                                    for c in clean_str:
-                                        if c.isdigit() or c == '.':
-                                            num_part += c
-                                        elif num_part:
-                                            break
-
-                                    if num_part:
-                                        size = float(num_part)
-                                        if 'gib' in size_str.lower() or 'g' in size_str.lower():
-                                            filesize = size * 1024
-                                        elif 'mib' in size_str.lower() or 'm' in size_str.lower():
-                                            filesize = size
-                                        elif 'kib' in size_str.lower() or 'k' in size_str.lower():
-                                            filesize = size / 1024
-                            except Exception as e:
-                                print(f"解析文件大小错误: {e}")
-                            break
-
-                    is_audio = 'm4a' in line.lower() or 'aac' in line.lower()
-                    if (resolution and resolution.endswith('p')) or is_audio:
-                        format_info = '音频/AAC' if is_audio else f'{resolution}/H.264'
-                        if fps:
-                            format_info += f'/{fps}fps'
-                        if filesize > 0:
-                            if filesize >= 1024:
-                                format_info += f'/{round(filesize/1024, 2)}GB'
-                            else:
-                                format_info += f'/{round(filesize, 1)}MB'
-                        else:
-                            try:
-                                size_match = re.search(r'~?\s*(\d+(\.\d+)?)\s*(G|M|K)i?B', line, re.IGNORECASE)
-                                if size_match:
-                                    size = float(size_match.group(1))
-                                    unit = size_match.group(3).upper()
-                                    if unit == 'G':
-                                        format_info += f'/{round(size, 2)}GB'
-                                    elif unit == 'M':
-                                        format_info += f'/{round(size, 1)}MB'
-                                    elif unit == 'K':
-                                        format_info += f'/{round(size, 1)}KB'
-                            except Exception as e:
-                                print(f"最后尝试解析文件大小错误: {e}")
-
-                        if not any(existing_id == format_id for existing_id, _ in self.available_formats):
-                            self.available_formats.append((format_id, format_info))
-
+        output, error_output = process.communicate()
+        self.process = None
 
         if not self.is_running:
             if process.poll() is None:
                 process.terminate()
             return False, '嗅探已取消', []
 
-        process.wait()
         if process.returncode == 0:
-            self.collect_subtitles(cookie_mode)
+            info = self.parse_info_json(output)
+            if not info:
+                return False, '嗅探返回了无法解析的 JSON', []
+
+            self.populate_formats_from_info(info)
             if not self.available_formats and not self.subtitle_entries:
-                return False, '未找到可用的H.264视频格式或字幕', []
+                return False, '未找到可用的 H.264 视频格式或字幕', []
 
             resolutions = {
                 '2160p': 2160,
@@ -281,22 +469,32 @@ class SniffThread(QThread):
             combined_formats = self.available_formats + self.subtitle_entries
             return True, '嗅探完成', combined_formats
 
-        return False, '嗅探失败', []
+        combined_error = '\n'.join(part for part in [error_output, output] if part).strip()
+        if site == 'bilibili' and ('HTTP Error 412' in combined_error or 'Precondition Failed' in combined_error):
+            return self.run_bilibili_webpage_sniff()
+
+        return False, self.normalize_error_message(site, combined_error), []
 
     def run(self):
         try:
-            is_youtube = 'youtube.com' in self.url.lower() or 'youtu.be' in self.url.lower()
+            site = detect_site(self.url)
             cookie_modes = ['none']
-            if is_youtube:
+            if site == 'youtube':
                 if self.parent().manual_cookie_enabled and os.path.exists(self.parent().cookie_file):
                     cookie_modes = ['file']
                 else:
-                    cookie_modes = ['none', 'firefox']
+                    cookie_modes = ['none', 'browser:firefox']
+            elif site == 'bilibili':
+                if self.parent().manual_cookie_enabled and os.path.exists(self.parent().cookie_file):
+                    cookie_modes = ['file']
+                else:
+                    cookie_modes = ['none', 'browser:firefox', 'browser:edge', 'browser:chrome']
 
             last_message = '嗅探失败'
             for cookie_mode in cookie_modes:
-                if is_youtube and cookie_mode == 'firefox':
-                    self.progress_signal.emit('普通嗅探失败，正在尝试调用 Firefox Cookies...')
+                if cookie_mode.startswith('browser:'):
+                    browser_name = cookie_mode.split(':', 1)[1].capitalize()
+                    self.progress_signal.emit(f'普通嗅探失败，正在尝试调用 {browser_name} Cookies...')
                 success, message, formats = self.run_sniff(cookie_mode)
                 if success:
                     self.finished_signal.emit(True, message, formats, cookie_mode)
@@ -306,8 +504,12 @@ class SniffThread(QThread):
                     self.finished_signal.emit(False, '嗅探已取消', [], cookie_mode)
                     return
 
-            if is_youtube and not self.parent().manual_cookie_enabled:
+            if site == 'youtube' and not self.parent().manual_cookie_enabled:
                 self.finished_signal.emit(False, 'Firefox Cookies 调用失败，请手动输入 Cookies 后重试。', [], 'show_cookie_input')
+                return
+
+            if site == 'bilibili' and not self.parent().manual_cookie_enabled:
+                self.finished_signal.emit(False, 'B站常规接口失败时，程序会先尝试网页直连；若你需要更高画质或登录态资源，请手动输入 Cookies 后重试。', [], 'show_cookie_input')
                 return
 
             self.finished_signal.emit(False, last_message, [], 'none')
@@ -332,84 +534,187 @@ class DownloadThread(QThread):
         self.is_running = True
         self.process = None
 
+    def finalize_downloaded_file(self, downloaded_file):
+        if not downloaded_file or not os.path.exists(downloaded_file):
+            return
+
+        file_size = os.path.getsize(downloaded_file)
+        file_size_str = ''
+        if file_size >= 1024 * 1024 * 1024:
+            file_size_str = f'.{round(file_size / (1024 * 1024 * 1024), 2)}G'
+        elif file_size >= 1024 * 1024:
+            file_size_str = f'.{round(file_size / (1024 * 1024), 1)}M'
+        elif file_size >= 1024:
+            file_size_str = f'.{round(file_size / 1024, 1)}K'
+
+        base_name, ext = os.path.splitext(downloaded_file)
+        if ext.lower() in ['.m4a', '.aac']:
+            new_name = f'{base_name}{file_size_str}{ext}'
+        elif ext.lower() == '.mp4':
+            format_info = next((label for label, fmt_id in self.parent().format_id_map.items() if fmt_id == self.format_id), '')
+            resolution = format_info.split('/')[0] if format_info else ''
+            if resolution:
+                new_name = f'{base_name}.{resolution}{ext}'
+            else:
+                new_name = downloaded_file
+        else:
+            new_name = downloaded_file
+
+        try:
+            if new_name != downloaded_file:
+                os.rename(downloaded_file, new_name)
+        except Exception as e:
+            print(f'重命名文件失败：{str(e)}')
+
+    def download_url_to_file(self, url, target_path, headers):
+        request = urllib.request.Request(url, headers=headers or {})
+        with urllib.request.urlopen(request, timeout=30) as response, open(target_path, 'wb') as output_file:
+            total = response.headers.get('Content-Length')
+            total_bytes = int(total) if total and total.isdigit() else 0
+            downloaded = 0
+            last_reported_mb = -1
+
+            while self.is_running:
+                chunk = response.read(1024 * 256)
+                if not chunk:
+                    break
+                output_file.write(chunk)
+                downloaded += len(chunk)
+
+                current_mb = downloaded // (1024 * 1024)
+                if current_mb != last_reported_mb:
+                    last_reported_mb = current_mb
+                    if total_bytes:
+                        percent = int(downloaded * 100 / total_bytes)
+                        self.progress_signal.emit(f'正在下载直连流... {percent}%')
+                    else:
+                        self.progress_signal.emit(f'正在下载直连流... {round(downloaded / (1024 * 1024), 1)}MB')
+
+            if not self.is_running:
+                raise RuntimeError('下载已取消')
+
+    def run_direct_download(self, direct_payload):
+        output_dir = os.getcwd()
+        title = sanitize_filename(direct_payload.get('title') or 'bilibili_video')
+        temp_paths = []
+
+        try:
+            if direct_payload.get('type') == 'bilibili_direct_audio':
+                final_path = ensure_unique_path(os.path.join(output_dir, f'{title}.m4a'))
+                temp_path = final_path + '.part'
+                temp_paths.append(temp_path)
+                self.progress_signal.emit('正在下载 B站音频直链...')
+                self.download_url_to_file(
+                    direct_payload['audio_url'],
+                    temp_path,
+                    direct_payload.get('headers'),
+                )
+                os.replace(temp_path, final_path)
+                self.finalize_downloaded_file(final_path)
+                self.finished_signal.emit(True, '下载完成')
+                return
+
+            final_path = ensure_unique_path(os.path.join(output_dir, f'{title}.mp4'))
+            temp_video_path = final_path + '.video.m4s'
+            temp_audio_path = final_path + '.audio.m4a'
+            temp_paths.extend([temp_video_path, temp_audio_path])
+
+            self.progress_signal.emit('正在下载 B站视频直链...')
+            self.download_url_to_file(
+                direct_payload['video_url'],
+                temp_video_path,
+                direct_payload.get('headers'),
+            )
+
+            audio_url = direct_payload.get('audio_url')
+            if audio_url:
+                self.progress_signal.emit('正在下载 B站音频直链...')
+                self.download_url_to_file(audio_url, temp_audio_path, direct_payload.get('headers'))
+
+            ffmpeg_cmd = [self.parent().get_ffmpeg_command(), '-y', '-i', temp_video_path]
+            if audio_url:
+                ffmpeg_cmd.extend(['-i', temp_audio_path, '-c', 'copy', final_path])
+            else:
+                ffmpeg_cmd.extend(['-c', 'copy', final_path])
+
+            self.progress_signal.emit('正在用 FFmpeg 合并 B站音视频...')
+            result = subprocess.run(
+                ffmpeg_cmd,
+                capture_output=True,
+                text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+                timeout=120,
+            )
+            if result.returncode != 0:
+                raise RuntimeError((result.stderr or result.stdout or 'FFmpeg 合并失败').strip())
+
+            self.finalize_downloaded_file(final_path)
+            self.finished_signal.emit(True, '下载完成')
+        finally:
+            for temp_path in temp_paths:
+                try:
+                    if os.path.exists(temp_path):
+                        os.remove(temp_path)
+                except Exception:
+                    pass
+
+    def run_ytdlp_download(self):
+        site = detect_site(self.url)
+        is_subtitle = self.format_id.startswith('subtitle:')
+        if is_subtitle:
+            _, subtitle_lang, subtitle_mode = self.format_id.split(':', 2)
+            cmd = [self.parent().get_ytdlp_command()]
+            if subtitle_mode == 'auto':
+                cmd.append('--write-auto-sub')
+            else:
+                cmd.append('--write-sub')
+            cmd.extend(['--sub-lang', subtitle_lang, '--convert-subs', 'srt', '--skip-download'])
+        else:
+            cmd = [self.parent().get_ytdlp_command(), '-f', f'{self.format_id}+bestaudio[ext=m4a]']
+
+        if site in {'youtube', 'bilibili'}:
+            cmd.extend(get_cookie_args(self.parent().cookie_mode, self.parent().cookie_file))
+
+        if is_subtitle:
+            cmd.extend([self.url, '--newline'])
+        else:
+            cmd.extend(['--merge-output-format', 'mp4', self.url, '--newline'])
+
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        self.process = process
+        downloaded_file = None
+
+        while self.is_running:
+            line = process.stdout.readline()
+            if not line:
+                break
+            line = line.strip()
+            self.progress_signal.emit(line)
+            if '[download] Destination:' in line:
+                downloaded_file = line.split(':', 1)[1].strip()
+            elif '[Merger] Merging formats into ' in line:
+                downloaded_file = line.split('into ', 1)[1].strip().strip('"')
+
+        process.wait()
+        if process.returncode == 0:
+            self.finalize_downloaded_file(downloaded_file)
+            self.finished_signal.emit(True, '下载完成' if not is_subtitle else '字幕下载完成')
+        else:
+            self.finished_signal.emit(False, '下载失败')
+
     def run(self):
         try:
-            # 下载并合并视频和音频，选择最高码率的m4a(aac)音频
-            # 检查是否为YouTube链接，只有YouTube链接才需要Cookies
-            is_youtube = 'youtube.com' in self.url.lower() or 'youtu.be' in self.url.lower()
-            
-            is_subtitle = self.format_id.startswith('subtitle:')
-            if is_subtitle:
-                _, subtitle_lang, subtitle_mode = self.format_id.split(':', 2)
-                cmd = [self.parent().get_ytdlp_command()]
-                if subtitle_mode == 'auto':
-                    cmd.append('--write-auto-sub')
-                else:
-                    cmd.append('--write-sub')
-                cmd.extend(['--sub-lang', subtitle_lang, '--convert-subs', 'srt', '--skip-download'])
+            direct_payload = self.parent().get_direct_download_payload(self.format_id)
+            if direct_payload:
+                self.run_direct_download(direct_payload)
             else:
-                cmd = [self.parent().get_ytdlp_command(), '-f', f'{self.format_id}+bestaudio[ext=m4a]']
-            if is_youtube and self.parent().cookie_mode == 'firefox':
-                cmd.extend(['--cookies-from-browser', 'firefox'])
-            elif is_youtube and self.parent().cookie_mode == 'file' and os.path.exists(self.parent().cookie_file):
-                cmd.extend(['--cookies', self.parent().cookie_file])
-            if is_subtitle:
-                cmd.extend([self.url, '--newline'])
-            else:
-                cmd.extend(['--merge-output-format', 'mp4', self.url, '--newline'])
-            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, creationflags=subprocess.CREATE_NO_WINDOW)
-            self.process = process
-            downloaded_file = None
-            
-            while self.is_running:
-                line = process.stdout.readline()
-                if not line:
-                    break
-                line = line.strip()
-                self.progress_signal.emit(line)
-                if '[download] Destination:' in line:
-                    downloaded_file = line.split(':', 1)[1].strip()
-                elif '[Merger] Merging formats into ' in line:
-                    downloaded_file = line.split('into ', 1)[1].strip().strip('"')
-            
-            process.wait()
-            if process.returncode == 0:
-                if downloaded_file and os.path.exists(downloaded_file):
-                    # 获取文件大小
-                    file_size = os.path.getsize(downloaded_file)
-                    file_size_str = ''
-                    if file_size >= 1024 * 1024 * 1024:  # GB
-                        file_size_str = f'.{round(file_size / (1024 * 1024 * 1024), 2)}G'
-                    elif file_size >= 1024 * 1024:  # MB
-                        file_size_str = f'.{round(file_size / (1024 * 1024), 1)}M'
-                    elif file_size >= 1024:  # KB
-                        file_size_str = f'.{round(file_size / 1024, 1)}K'
-                    
-                    # 获取文件扩展名和基本名称
-                    base_name, ext = os.path.splitext(downloaded_file)
-                    
-                    # 根据文件类型添加不同的后缀
-                    if ext.lower() in ['.m4a', '.aac']:
-                        new_name = f'{base_name}{file_size_str}{ext}'
-                    elif ext.lower() == '.mp4':
-                        format_info = next((label for label, fmt_id in self.parent().format_id_map.items() if fmt_id == self.format_id), '')
-                        resolution = format_info.split('/')[0] if format_info else ''
-                        if resolution:
-                            new_name = f'{base_name}.{resolution}{ext}'
-                        else:
-                            new_name = downloaded_file
-                    else:
-                        new_name = downloaded_file
-                    
-                    try:
-                        if new_name != downloaded_file:
-                            os.rename(downloaded_file, new_name)
-                    except Exception as e:
-                        print(f'重命名文件失败：{str(e)}')
-                
-                self.finished_signal.emit(True, '下载完成' if not is_subtitle else '字幕下载完成')
-            else:
-                self.finished_signal.emit(False, '下载失败')
+                self.run_ytdlp_download()
         except Exception as e:
             self.finished_signal.emit(False, f'发生错误：{str(e)}')
 
@@ -538,6 +843,7 @@ class MainWindow(QMainWindow):
         self.cookie_mode = 'none'
         self.manual_cookie_enabled = False
         self.format_id_map = {}
+        self.direct_download_map = {}
         self.is_sniffing = False
 
         # 创建主窗口部件和布局
@@ -629,6 +935,12 @@ class MainWindow(QMainWindow):
         ffmpeg_cmd = self.get_ffmpeg_command()
         return bool(ffmpeg_cmd and os.path.exists(ffmpeg_cmd)) or bool(shutil.which('ffmpeg.exe') or shutil.which('ffmpeg'))
 
+    def set_direct_download_payloads(self, payloads):
+        self.direct_download_map = payloads or {}
+
+    def get_direct_download_payload(self, format_id):
+        return self.direct_download_map.get(format_id)
+
     def update_ytdlp(self):
         target_path = get_managed_ytdlp_path()
         self.update_ytdlp_button.setEnabled(False)
@@ -657,6 +969,7 @@ class MainWindow(QMainWindow):
             # 清空格式选择框
             self.format_combo.clear()
             self.format_id_map.clear()
+            self.set_direct_download_payloads({})
             
             # 更改按钮文本和状态
             self.download_button.setText('正在嗅探中')
@@ -715,6 +1028,7 @@ class MainWindow(QMainWindow):
             # 清空并更新格式选择框
             self.format_combo.clear()
             self.format_id_map.clear()
+            self.set_direct_download_payloads({})
             
             for format_id, resolution in formats:
                 self.format_combo.addItem(resolution)
@@ -731,6 +1045,7 @@ class MainWindow(QMainWindow):
             self.progress_text.setText('准备就绪')
             self.format_combo.clear()
             self.format_id_map.clear()
+            self.set_direct_download_payloads({})
             
             if cookie_mode == 'show_cookie_input':
                 self.cookie_container.show()
@@ -917,6 +1232,7 @@ class MainWindow(QMainWindow):
         # 清空格式选择框和相关状态
         self.format_combo.clear()
         self.format_id_map.clear()
+        self.set_direct_download_payloads({})
         self.cookie_mode = 'none'
         self.cookie_container.hide()
         self.download_button.setText('开始嗅探')
