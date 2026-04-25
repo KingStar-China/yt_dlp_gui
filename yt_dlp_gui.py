@@ -13,6 +13,7 @@ import json
 import gzip
 import zlib
 import hashlib
+import random
 try:
     import requests
 except ImportError:
@@ -68,6 +69,25 @@ BILIBILI_WEB_UA = (
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
     '(KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36'
 )
+
+RESOLUTION_SORT_ORDER = {
+    '2160p': 2160,
+    '1440p': 1440,
+    '1080p': 1080,
+    '720p': 720,
+    '480p': 480,
+    '360p': 360,
+    '240p': 240,
+    '144p': 144,
+}
+
+VIDEO_CODEC_PRIORITY = [
+    ('H.264', ('avc1', 'avc3', 'h264', 'avc')),
+    ('H.265', ('hev1', 'hvc1', 'hevc', 'h265')),
+    ('AV1', ('av01', 'av1')),
+    ('VP9', ('vp09', 'vp9')),
+    ('H.266', ('vvc1', 'vvi1', 'vvc', 'h266')),
+]
 
 
 def detect_site(url):
@@ -134,6 +154,59 @@ def build_bilibili_mixin_key(img_url, sub_url):
     if len(lookup) < 64:
         return ''
     return ''.join(lookup[index] for index in mixin_key_enc_tab)[:32]
+
+
+def get_codec_label_and_priority(codec_name):
+    normalized = str(codec_name or '').strip().lower()
+    for index, (label, patterns) in enumerate(VIDEO_CODEC_PRIORITY):
+        if any(pattern in normalized for pattern in patterns):
+            return label, index
+
+    if normalized in {'none', ''}:
+        return '', len(VIDEO_CODEC_PRIORITY)
+
+    fallback = normalized.split('.')[0].replace('-', '').replace('_', '').upper()
+    return fallback or 'OTHER', len(VIDEO_CODEC_PRIORITY)
+
+
+def build_video_sort_key(candidate):
+    return (
+        float(candidate.get('fps') or 0),
+        float(candidate.get('bandwidth') or candidate.get('tbr') or 0),
+        float(candidate.get('filesize') or 0),
+        str(candidate.get('format_id') or ''),
+    )
+
+
+def select_best_video_candidates(video_candidates):
+    grouped_candidates = {}
+    for candidate in video_candidates:
+        resolution = candidate.get('resolution')
+        if not resolution:
+            continue
+        grouped_candidates.setdefault(resolution, []).append(candidate)
+
+    selected_candidates = []
+    for resolution, candidates in grouped_candidates.items():
+        preferred_candidates = [
+            candidate for candidate in candidates
+            if candidate.get('codec_priority', len(VIDEO_CODEC_PRIORITY)) < len(VIDEO_CODEC_PRIORITY)
+        ]
+        if preferred_candidates:
+            best_priority = min(candidate['codec_priority'] for candidate in preferred_candidates)
+            best_candidates = [
+                candidate for candidate in preferred_candidates
+                if candidate['codec_priority'] == best_priority
+            ]
+            selected_candidates.append(max(best_candidates, key=build_video_sort_key))
+        else:
+            selected_candidates.append(random.choice(candidates))
+
+    selected_candidates.sort(
+        key=lambda candidate: RESOLUTION_SORT_ORDER.get(candidate.get('resolution'), 0),
+        reverse=True,
+    )
+    return selected_candidates
 
 class SniffThread(QThread):
     progress_signal = pyqtSignal(str)
@@ -213,6 +286,8 @@ class SniffThread(QThread):
     def populate_formats_from_info(self, info):
         self.available_formats = []
         self.subtitle_entries = []
+        video_candidates = []
+        audio_candidates = []
 
         for fmt in info.get('formats') or []:
             format_id = str(fmt.get('format_id') or '').strip()
@@ -228,29 +303,59 @@ class SniffThread(QThread):
 
             is_audio = vcodec == 'none' and acodec != 'none'
             is_aac_audio = any(token in acodec for token in ('aac', 'mp4a')) or ext in {'m4a', 'aac'}
-            is_h264_video = vcodec != 'none' and any(token in vcodec for token in ('avc1', 'h264'))
+            codec_label, codec_priority = get_codec_label_and_priority(vcodec)
 
             if is_audio:
                 if not is_aac_audio:
                     continue
-                format_info = '音频/AAC'
-            elif is_h264_video and resolution:
-                format_info = f'{resolution}/H.264'
-            else:
+                audio_candidates.append({
+                    'format_id': format_id,
+                    'label': '音频/AAC',
+                    'filesize': filesize,
+                    'tbr': fmt.get('tbr') or 0,
+                })
+                continue
+            if not resolution or not codec_label:
                 continue
 
+            video_candidates.append({
+                'format_id': format_id,
+                'resolution': resolution,
+                'codec_label': codec_label,
+                'codec_priority': codec_priority,
+                'fps': fps or 0,
+                'bandwidth': fmt.get('tbr') or 0,
+                'filesize': filesize,
+            })
+
+        for candidate in select_best_video_candidates(video_candidates):
+            format_info = f"{candidate['resolution']}/{candidate['codec_label']}"
             try:
-                if fps:
-                    format_info += f'/{int(round(float(fps)))}fps'
+                if candidate.get('fps'):
+                    format_info += f"/{int(round(float(candidate['fps'])))}fps"
             except Exception:
                 pass
 
-            size_label = format_size_from_bytes(filesize)
+            size_label = format_size_from_bytes(candidate.get('filesize'))
             if size_label:
                 format_info += f'/{size_label}'
 
-            if not any(existing_id == format_id for existing_id, _ in self.available_formats):
-                self.available_formats.append((format_id, format_info))
+            self.available_formats.append((candidate['format_id'], format_info))
+
+        if audio_candidates:
+            best_audio = max(
+                audio_candidates,
+                key=lambda candidate: (
+                    float(candidate.get('tbr') or 0),
+                    float(candidate.get('filesize') or 0),
+                    str(candidate.get('format_id') or ''),
+                )
+            )
+            audio_label = best_audio['label']
+            size_label = format_size_from_bytes(best_audio.get('filesize'))
+            if size_label:
+                audio_label += f'/{size_label}'
+            self.available_formats.append((best_audio['format_id'], audio_label))
 
         self.add_subtitle_group(info.get('subtitles'), 'manual')
         self.add_subtitle_group(info.get('automatic_captions'), 'auto')
@@ -438,6 +543,7 @@ class SniffThread(QThread):
         )
         page_url = self.url
         download_payloads = {}
+        video_candidates = []
 
         preferred_audio = None
         for index, audio in enumerate(audios):
@@ -477,9 +583,6 @@ class SniffThread(QThread):
 
         for index, video in enumerate(videos):
             video_codec = str(video.get('codecs') or '').lower()
-            if not any(token in video_codec for token in ('avc1', 'h264')):
-                continue
-
             video_url = video.get('baseUrl') or video.get('base_url') or video.get('url')
             if not video_url:
                 continue
@@ -489,21 +592,10 @@ class SniffThread(QThread):
                 continue
             resolution = f'{int(height)}p'
             format_id = f'bili-direct-video:{index}'
-            format_info = f'{resolution}/H.264'
-
-            try:
-                fps = float(video.get('frameRate') or video.get('frame_rate') or 0)
-                if fps:
-                    format_info += f'/{int(round(fps))}fps'
-            except Exception:
-                pass
-
-            size_label = format_size_from_bytes(video.get('size') or 0)
-            if size_label:
-                format_info += f'/{size_label}'
-
-            self.available_formats.append((format_id, format_info))
-            download_payloads[format_id] = {
+            codec_label, codec_priority = get_codec_label_and_priority(video_codec)
+            if not codec_label:
+                continue
+            payload = {
                 'type': 'bilibili_direct_video',
                 'title': title,
                 'video_url': video_url,
@@ -511,27 +603,43 @@ class SniffThread(QThread):
                 'video_ext': 'mp4',
                 'audio_ext': 'm4a',
                 'resolution': resolution,
+                'codec_label': codec_label,
                 'headers': {
                     'User-Agent': BILIBILI_WEB_UA,
                     'Referer': page_url,
                 },
             }
+            download_payloads[format_id] = payload
+            video_candidates.append({
+                'format_id': format_id,
+                'resolution': resolution,
+                'codec_label': codec_label,
+                'codec_priority': codec_priority,
+                'fps': video.get('frameRate') or video.get('frame_rate') or 0,
+                'bandwidth': video.get('bandwidth') or 0,
+                'filesize': video.get('size') or 0,
+            })
+
+        for candidate in select_best_video_candidates(video_candidates):
+            format_info = f"{candidate['resolution']}/{candidate['codec_label']}"
+
+            try:
+                if candidate.get('fps'):
+                    format_info += f"/{int(round(float(candidate['fps'])))}fps"
+            except Exception:
+                pass
+
+            size_label = format_size_from_bytes(candidate.get('filesize'))
+            if size_label:
+                format_info += f'/{size_label}'
+
+            self.available_formats.append((candidate['format_id'], format_info))
 
         if not self.available_formats:
-            return False, 'B站网页已打开，但没解析到可直连的 H.264/AAC 格式', []
+            return False, 'B站网页已打开，但没解析到可直连的视频或 AAC 音频格式', []
 
         self.parent().set_direct_download_payloads(download_payloads)
-        resolutions = {
-            '2160p': 2160,
-            '1440p': 1440,
-            '1080p': 1080,
-            '720p': 720,
-            '480p': 480,
-            '360p': 360,
-            '240p': 240,
-            '144p': 144,
-        }
-        self.available_formats.sort(key=lambda x: resolutions.get(x[1].split('/')[0], 0), reverse=True)
+        self.available_formats.sort(key=lambda x: RESOLUTION_SORT_ORDER.get(x[1].split('/')[0], -1), reverse=True)
         return True, 'B站网页直连嗅探完成', self.available_formats
 
     def normalize_error_message(self, site, error_text):
@@ -572,19 +680,12 @@ class SniffThread(QThread):
 
             self.populate_formats_from_info(info)
             if not self.available_formats and not self.subtitle_entries:
-                return False, '未找到可用的 H.264 视频格式或字幕', []
+                return False, '未找到可用的视频格式或字幕', []
 
-            resolutions = {
-                '2160p': 2160,
-                '1440p': 1440,
-                '1080p': 1080,
-                '720p': 720,
-                '480p': 480,
-                '360p': 360,
-                '240p': 240,
-                '144p': 144,
-            }
-            self.available_formats.sort(key=lambda x: resolutions.get(x[1].split('/')[0], 0), reverse=True)
+            self.available_formats.sort(
+                key=lambda x: RESOLUTION_SORT_ORDER.get(x[1].split('/')[0], -1),
+                reverse=True,
+            )
             combined_formats = self.available_formats + self.subtitle_entries
             return True, '嗅探完成', combined_formats
 
