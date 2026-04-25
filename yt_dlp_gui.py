@@ -516,9 +516,9 @@ class SniffThread(QThread):
         accept_quality = playinfo_data.get('accept_quality') or []
         if site == 'bilibili' and accept_quality:
             if max(int(quality) for quality in accept_quality if str(quality).isdigit()) > 64 and actual_max_height < 720:
-                self.cookie_warning_message = '更高清视频需要火狐登录或者手动填写Cookie（推荐火狐登录成功率更高）。'
+                self.cookie_warning_message = '更高清视频需要浏览器登录或者手动填写Cookie（推荐火狐登录成功率更高）。'
         elif site == 'youtube' and actual_max_height < 720:
-            self.cookie_warning_message = '更高清视频可能需要火狐登录或者手动填写Cookie（推荐火狐登录成功率更高）。'
+            self.cookie_warning_message = '更高清视频可能需要浏览器登录或者手动填写Cookie（推荐火狐登录成功率更高）。'
 
     def fetch_bilibili_page_data(self, cookie_mode):
         headers = {
@@ -910,11 +910,11 @@ class SniffThread(QThread):
                 last_message = message
 
             if site == 'youtube' and not self.parent().manual_cookie_enabled:
-                self.finished_signal.emit(False, '嗅探失败，需要火狐登录或者手动填写Cookie（推荐火狐登录成功率更高）。', [], 'show_cookie_input')
+                self.finished_signal.emit(False, '嗅探失败，需要浏览器登录或者手动填写Cookie（推荐火狐登录成功率更高）。', [], 'show_cookie_input')
                 return
 
             if site == 'bilibili' and not self.parent().manual_cookie_enabled:
-                self.finished_signal.emit(False, '嗅探失败，需要火狐登录或者手动填写Cookie（推荐火狐登录成功率更高）。', [], 'show_cookie_input')
+                self.finished_signal.emit(False, '嗅探失败，需要浏览器登录或者手动填写Cookie（推荐火狐登录成功率更高）。', [], 'show_cookie_input')
                 return
 
             self.finished_signal.emit(False, last_message, [], 'none')
