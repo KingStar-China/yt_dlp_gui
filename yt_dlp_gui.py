@@ -257,18 +257,28 @@ class SniffThread(QThread):
                     raw_data = zlib.decompress(raw_data)
                 html = raw_data.decode('utf-8', errors='ignore')
 
-        playinfo = self.extract_embedded_json(html, 'window.__playinfo__=')
-        initial_state = self.extract_embedded_json(html, 'window.__INITIAL_STATE__=')
+        playinfo = self.extract_embedded_json(html, r'window\.__playinfo__\s*=')
+        initial_state = self.extract_embedded_json(html, r'window\.__INITIAL_STATE__\s*=')
         if not playinfo:
-            raise ValueError('B站页面里没找到 __playinfo__')
+            if initial_state:
+                raise ValueError('B站页面已打开，但播放器数据没内嵌到源码里')
+            if any(keyword in html for keyword in ['验证码', '安全验证', '风控', '请完成验证', 'geetest']):
+                raise ValueError('B站返回了风控/验证页面，请稍后重试或提供 Cookies')
+            page_title_match = re.search(r'<title[^>]*>(.*?)</title>', html, re.IGNORECASE | re.DOTALL)
+            page_title = ''
+            if page_title_match:
+                page_title = re.sub(r'\s+', ' ', page_title_match.group(1)).strip()
+            if page_title:
+                raise ValueError(f'B站返回的不是标准视频页：{page_title}')
+            raise ValueError('B站页面里没找到播放器数据')
         return playinfo, initial_state
 
-    def extract_embedded_json(self, html, marker):
-        start = html.find(marker)
-        if start < 0:
+    def extract_embedded_json(self, html, marker_pattern):
+        marker_match = re.search(marker_pattern, html)
+        if not marker_match:
             return None
 
-        start = html.find('{', start)
+        start = html.find('{', marker_match.end())
         if start < 0:
             return None
 
