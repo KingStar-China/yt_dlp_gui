@@ -14,6 +14,8 @@ import gzip
 import zlib
 import hashlib
 import random
+import sqlite3
+import configparser
 from http.cookiejar import MozillaCookieJar
 try:
     import requests
@@ -165,6 +167,108 @@ def load_cookie_jar_from_file(cookie_file):
     return cookie_jar
 
 
+def get_firefox_profiles_root():
+    appdata = os.getenv('APPDATA') or ''
+    if not appdata:
+        return None
+    profiles_root = os.path.join(appdata, 'Mozilla', 'Firefox')
+    return profiles_root if os.path.isdir(profiles_root) else None
+
+
+def resolve_firefox_profile_path(base_dir, profile_path, is_relative):
+    if not profile_path:
+        return None
+    full_path = os.path.join(base_dir, profile_path) if is_relative else profile_path
+    return full_path if os.path.isdir(full_path) else None
+
+
+def get_firefox_cookie_database_path():
+    profiles_root = get_firefox_profiles_root()
+    if not profiles_root:
+        return None
+
+    profiles_ini = os.path.join(profiles_root, 'profiles.ini')
+    if not os.path.exists(profiles_ini):
+        return None
+
+    parser = configparser.ConfigParser()
+    parser.read(profiles_ini, encoding='utf-8')
+    candidates = []
+
+    for section_name in parser.sections():
+        section = parser[section_name]
+        if section_name.startswith('Install') and section.get('Default'):
+            profile_path = resolve_firefox_profile_path(profiles_root, section.get('Default'), True)
+            if profile_path:
+                candidates.append((0, profile_path))
+
+    for section_name in parser.sections():
+        if not section_name.startswith('Profile'):
+            continue
+        section = parser[section_name]
+        profile_path = resolve_firefox_profile_path(
+            profiles_root,
+            section.get('Path'),
+            section.getboolean('IsRelative', fallback=True),
+        )
+        if not profile_path:
+            continue
+        priority = 3
+        if section.getboolean('Default', fallback=False):
+            priority = 1
+        elif section.get('Name', '').lower() == 'default-release':
+            priority = 2
+        candidates.append((priority, profile_path))
+
+    for _, profile_path in sorted(candidates, key=lambda item: item[0]):
+        cookie_db = os.path.join(profile_path, 'cookies.sqlite')
+        if os.path.exists(cookie_db):
+            return cookie_db
+    return None
+
+
+def load_firefox_cookie_records(domain_keywords=None):
+    cookie_db = get_firefox_cookie_database_path()
+    if not cookie_db:
+        return []
+
+    temp_db = tempfile.NamedTemporaryFile(delete=False, suffix='.sqlite')
+    temp_db_path = temp_db.name
+    temp_db.close()
+
+    try:
+        shutil.copy2(cookie_db, temp_db_path)
+        connection = sqlite3.connect(temp_db_path)
+        try:
+            cursor = connection.cursor()
+            cursor.execute(
+                'SELECT name, value, host, path, expiry, isSecure FROM moz_cookies'
+            )
+            rows = cursor.fetchall()
+        finally:
+            connection.close()
+    finally:
+        try:
+            os.remove(temp_db_path)
+        except Exception:
+            pass
+
+    cookie_records = []
+    for name, value, host, path, expiry, is_secure in rows:
+        host_text = str(host or '')
+        if domain_keywords and not any(keyword in host_text for keyword in domain_keywords):
+            continue
+        cookie_records.append({
+            'name': name,
+            'value': value,
+            'domain': host_text,
+            'path': path or '/',
+            'expires': int(expiry) if expiry else None,
+            'secure': bool(is_secure),
+        })
+    return cookie_records
+
+
 def get_codec_label_and_priority(codec_name):
     normalized = str(codec_name or '').strip().lower()
     for index, (label, patterns) in enumerate(VIDEO_CODEC_PRIORITY):
@@ -229,6 +333,8 @@ class SniffThread(QThread):
         self.subtitle_entries = []
         self.process = None
         self.subtitle_process = None
+        self.cookie_warning_message = ''
+        self.cookie_required_message = ''
 
     def build_sniff_cmd(self, cookie_mode):
         cmd = [
@@ -380,11 +486,39 @@ class SniffThread(QThread):
             return
 
         if cookie_mode == 'browser:firefox':
-            if not os.path.exists(self.parent().cookie_file):
-                return
-            cookie_jar = load_cookie_jar_from_file(self.parent().cookie_file)
-            if cookie_jar is not None:
-                session.cookies.update(cookie_jar)
+            site = detect_site(self.url)
+            domain_keywords = []
+            if site == 'bilibili':
+                domain_keywords = ['bilibili.com', 'b23.tv']
+            elif site == 'youtube':
+                domain_keywords = ['youtube.com', 'youtu.be', 'google.com']
+            cookie_records = load_firefox_cookie_records(domain_keywords)
+            for cookie in cookie_records:
+                session.cookies.set(
+                    cookie['name'],
+                    cookie['value'],
+                    domain=cookie['domain'],
+                    path=cookie['path'],
+                    secure=cookie['secure'],
+                    expires=cookie['expires'],
+                )
+
+    def set_cookie_quality_warning(self, site, cookie_mode, playinfo_data, video_candidates):
+        if cookie_mode != 'none' or site not in {'bilibili', 'youtube'}:
+            return
+        if not video_candidates:
+            return
+
+        actual_max_height = max(
+            int(str(candidate.get('resolution', '0p')).replace('p', '') or 0)
+            for candidate in video_candidates
+        )
+        accept_quality = playinfo_data.get('accept_quality') or []
+        if site == 'bilibili' and accept_quality:
+            if max(int(quality) for quality in accept_quality if str(quality).isdigit()) > 64 and actual_max_height < 720:
+                self.cookie_warning_message = '更高清视频需要火狐登录或者手动填写Cookie。'
+        elif site == 'youtube' and actual_max_height < 720:
+            self.cookie_warning_message = '更高清视频可能需要火狐登录或者手动填写Cookie。'
 
     def fetch_bilibili_page_data(self, cookie_mode):
         headers = {
@@ -647,6 +781,8 @@ class SniffThread(QThread):
                 'filesize': video.get('size') or 0,
             })
 
+        self.set_cookie_quality_warning('bilibili', cookie_mode, playinfo_data, video_candidates)
+
         for candidate in select_best_video_candidates(video_candidates):
             format_info = f"{candidate['resolution']}/{candidate['codec_label']}"
 
@@ -682,6 +818,7 @@ class SniffThread(QThread):
     def run_sniff(self, cookie_mode):
         self.available_formats = []
         self.subtitle_entries = []
+        self.cookie_warning_message = ''
         self.parent().set_direct_download_payloads({})
         site = detect_site(self.url)
         process = subprocess.Popen(
@@ -724,6 +861,8 @@ class SniffThread(QThread):
 
     def run(self):
         try:
+            self.cookie_warning_message = ''
+            self.cookie_required_message = ''
             site = detect_site(self.url)
             cookie_modes = ['none']
             if site == 'youtube':
@@ -752,11 +891,11 @@ class SniffThread(QThread):
                     return
 
             if site == 'youtube' and not self.parent().manual_cookie_enabled:
-                self.finished_signal.emit(False, 'Firefox Cookies 调用失败，请手动输入 Cookies 后重试。', [], 'show_cookie_input')
+                self.finished_signal.emit(False, '嗅探失败，需要火狐登录或者手动填写Cookie。', [], 'show_cookie_input')
                 return
 
             if site == 'bilibili' and not self.parent().manual_cookie_enabled:
-                self.finished_signal.emit(False, 'B站常规接口失败时，程序会先尝试网页直连；若你需要更高画质或登录态资源，请手动输入 Cookies 后重试。', [], 'show_cookie_input')
+                self.finished_signal.emit(False, '嗅探失败，需要火狐登录或者手动填写Cookie。', [], 'show_cookie_input')
                 return
 
             self.finished_signal.emit(False, last_message, [], 'none')
@@ -1267,6 +1406,9 @@ class MainWindow(QMainWindow):
         self.is_sniffing = False
         self.download_button.setText('开始嗅探')
         self.download_button.setEnabled(True)  # 恢复按钮为可用状态
+        cookie_warning_message = ''
+        if self.sniff_thread:
+            cookie_warning_message = getattr(self.sniff_thread, 'cookie_warning_message', '')
         
         if success and formats:
             self.cookie_mode = cookie_mode
@@ -1286,6 +1428,10 @@ class MainWindow(QMainWindow):
                 self.format_combo.setCurrentIndex(0)
                 # 更改按钮文本为开始下载
                 self.download_button.setText('开始下载')
+
+            if cookie_warning_message:
+                self.cookie_container.show()
+                QMessageBox.warning(self, '提示', cookie_warning_message)
         else:
             # 嗅探失败时重置状态
             self.download_button.setText('开始嗅探')
