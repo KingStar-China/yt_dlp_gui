@@ -8,9 +8,11 @@ import ctypes
 import tempfile
 import shutil
 import urllib.request
+import urllib.parse
 import json
 import gzip
 import zlib
+import hashlib
 try:
     import requests
 except ImportError:
@@ -116,6 +118,22 @@ def ensure_unique_path(file_path):
         if not os.path.exists(candidate):
             return candidate
         index += 1
+
+
+def build_bilibili_mixin_key(img_url, sub_url):
+    lookup = (
+        str(img_url or '').rpartition('/')[2].partition('.')[0]
+        + str(sub_url or '').rpartition('/')[2].partition('.')[0]
+    )
+    mixin_key_enc_tab = [
+        46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35,
+        27, 43, 5, 49, 33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13,
+        37, 48, 7, 16, 24, 55, 40, 61, 26, 17, 0, 1, 60, 51, 30, 4,
+        22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11, 36, 20, 34, 44, 52,
+    ]
+    if len(lookup) < 64:
+        return ''
+    return ''.join(lookup[index] for index in mixin_key_enc_tab)[:32]
 
 class SniffThread(QThread):
     progress_signal = pyqtSignal(str)
@@ -242,8 +260,10 @@ class SniffThread(QThread):
             'User-Agent': BILIBILI_WEB_UA,
             'Referer': 'https://www.bilibili.com/',
         }
+        session = None
         if requests is not None:
-            response = requests.get(self.url, headers=headers, timeout=20)
+            session = requests.Session()
+            response = session.get(self.url, headers=headers, timeout=20)
             response.raise_for_status()
             html = response.text
         else:
@@ -261,7 +281,9 @@ class SniffThread(QThread):
         initial_state = self.extract_embedded_json(html, r'window\.__INITIAL_STATE__\s*=')
         if not playinfo:
             if initial_state:
-                raise ValueError('B站页面已打开，但播放器数据没内嵌到源码里')
+                playinfo = self.fetch_bilibili_playinfo_from_api(session, initial_state)
+            if playinfo:
+                return playinfo, initial_state
             if any(keyword in html for keyword in ['验证码', '安全验证', '风控', '请完成验证', 'geetest']):
                 raise ValueError('B站返回了风控/验证页面，请稍后重试或提供 Cookies')
             page_title_match = re.search(r'<title[^>]*>(.*?)</title>', html, re.IGNORECASE | re.DOTALL)
@@ -272,6 +294,93 @@ class SniffThread(QThread):
                 raise ValueError(f'B站返回的不是标准视频页：{page_title}')
             raise ValueError('B站页面里没找到播放器数据')
         return playinfo, initial_state
+
+    def get_bilibili_page_number(self):
+        try:
+            parsed_url = urllib.parse.urlparse(self.url)
+            query = urllib.parse.parse_qs(parsed_url.query)
+            page_no = int(query.get('p', ['1'])[0])
+            return max(page_no, 1)
+        except Exception:
+            return 1
+
+    def get_bilibili_video_identifiers(self, initial_state):
+        video_data = (initial_state or {}).get('videoData') or {}
+        pages = video_data.get('pages') or []
+        page_no = self.get_bilibili_page_number()
+        page_index = min(max(page_no - 1, 0), len(pages) - 1) if pages else 0
+        current_page = pages[page_index] if pages else {}
+        return {
+            'bvid': video_data.get('bvid') or (initial_state or {}).get('bvid'),
+            'aid': video_data.get('aid') or (initial_state or {}).get('aid'),
+            'cid': current_page.get('cid') or video_data.get('cid'),
+        }
+
+    def get_bilibili_wbi_key(self, session, initial_state):
+        default_key = build_bilibili_mixin_key(
+            ((initial_state or {}).get('defaultWbiKey') or {}).get('wbiImgKey'),
+            ((initial_state or {}).get('defaultWbiKey') or {}).get('wbiSubKey'),
+        )
+        if default_key:
+            return default_key
+
+        if session is None:
+            raise ValueError('当前环境缺少 requests，无法补拉 B站播放数据')
+
+        response = session.get(
+            'https://api.bilibili.com/x/web-interface/nav',
+            headers={'User-Agent': BILIBILI_WEB_UA, 'Referer': self.url},
+            timeout=20,
+        )
+        response.raise_for_status()
+        data = response.json().get('data') or {}
+        wbi_img = data.get('wbi_img') or {}
+        mixin_key = build_bilibili_mixin_key(wbi_img.get('img_url'), wbi_img.get('sub_url'))
+        if not mixin_key:
+            raise ValueError('获取 B站 WBI 签名失败')
+        return mixin_key
+
+    def sign_bilibili_wbi_params(self, params, mixin_key):
+        signed_params = {'wts': round(time.time())}
+        signed_params.update(params)
+        signed_params = {
+            key: ''.join(char for char in str(value) if char not in "!'()*")
+            for key, value in sorted(signed_params.items())
+        }
+        query = urllib.parse.urlencode(signed_params)
+        signed_params['w_rid'] = hashlib.md5(f'{query}{mixin_key}'.encode('utf-8')).hexdigest()
+        return signed_params
+
+    def fetch_bilibili_playinfo_from_api(self, session, initial_state):
+        if session is None:
+            return None
+
+        identifiers = self.get_bilibili_video_identifiers(initial_state)
+        bvid = identifiers.get('bvid')
+        cid = identifiers.get('cid')
+        if not bvid or not cid:
+            return None
+
+        mixin_key = self.get_bilibili_wbi_key(session, initial_state)
+        params = self.sign_bilibili_wbi_params(
+            {'bvid': bvid, 'cid': cid, 'fnval': 4048},
+            mixin_key,
+        )
+        response = session.get(
+            'https://api.bilibili.com/x/player/wbi/playurl',
+            params=params,
+            headers={
+                'User-Agent': BILIBILI_WEB_UA,
+                'Referer': self.url,
+                'Origin': 'https://www.bilibili.com',
+            },
+            timeout=20,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if payload.get('code') != 0:
+            raise ValueError(f'B站播放接口返回异常：{payload.get("message") or payload.get("code")}')
+        return payload
 
     def extract_embedded_json(self, html, marker_pattern):
         marker_match = re.search(marker_pattern, html)
