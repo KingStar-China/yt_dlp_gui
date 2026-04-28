@@ -1364,16 +1364,9 @@ class MainWindow(QMainWindow):
             '准备就绪！\n'
             '使用方法：粘贴视频链接后点击“开始嗅探”，选择清晰度后再点“开始下载”。\n'
             '输出地址：左键选择输出目录，右键打开输出目录。\n'
-            '若下载失败，可先浏览器登录对应网站或手动填写Cookie。'
+            '若下载失败，可先火狐浏览器登录对应网站或手动填写Cookie。'
         )
         layout.addWidget(self.progress_text)
-
-        # 创建菜单栏
-        menubar = self.menuBar()
-        help_menu = menubar.addMenu('帮助')
-        about_action = QAction('关于', self)
-        about_action.triggered.connect(self.show_about)
-        help_menu.addAction(about_action)
 
     def get_ytdlp_command(self):
         self.ytdlp_path = resolve_ytdlp_command()
