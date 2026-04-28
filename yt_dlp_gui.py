@@ -1360,7 +1360,12 @@ class MainWindow(QMainWindow):
         layout.addLayout(action_layout)
 
         # 进度显示区域
-        self.progress_text = QLabel('准备就绪！使用方法：粘贴视频链接后点击“开始嗅探”，选择清晰度后再点“开始下载”；若下载失败，可先浏览器登录对应网站或手动填写Cookie。')
+        self.progress_text = QLabel(
+            '准备就绪！\n'
+            '使用方法：粘贴视频链接后点击“开始嗅探”，选择清晰度后再点“开始下载”。\n'
+            '输出地址：左键选择输出目录，右键打开输出目录。\n'
+            '若下载失败，可先浏览器登录对应网站或手动填写Cookie。'
+        )
         layout.addWidget(self.progress_text)
 
         # 创建菜单栏
