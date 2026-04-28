@@ -1360,7 +1360,7 @@ class MainWindow(QMainWindow):
         layout.addLayout(action_layout)
 
         # 进度显示区域
-        self.progress_text = QLabel('准备就绪！（若下载失败请安装火狐浏览器并登录相应网站，比如油管以获得cookie。）')
+        self.progress_text = QLabel('准备就绪！使用方法：粘贴视频链接后点击“开始嗅探”，选择清晰度后再点“开始下载”；若下载失败，可先浏览器登录对应网站或手动填写Cookie。')
         layout.addWidget(self.progress_text)
 
         # 创建菜单栏
