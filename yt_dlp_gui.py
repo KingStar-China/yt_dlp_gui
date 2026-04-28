@@ -321,6 +321,14 @@ def select_best_video_candidates(video_candidates):
     )
     return selected_candidates
 
+
+def choose_bilibili_web_fallback_cookie_mode(cookie_modes):
+    if 'file' in cookie_modes:
+        return 'file'
+    if 'browser:firefox' in cookie_modes:
+        return 'browser:firefox'
+    return 'none'
+
 class SniffThread(QThread):
     progress_signal = pyqtSignal(str)
     finished_signal = pyqtSignal(bool, str, list, str)
@@ -629,7 +637,7 @@ class SniffThread(QThread):
 
         mixin_key = self.get_bilibili_wbi_key(session, initial_state)
         params = self.sign_bilibili_wbi_params(
-            {'bvid': bvid, 'cid': cid, 'fnval': 4048},
+            {'bvid': bvid, 'cid': cid, 'fnval': 4048, 'qn': 127, 'fourk': 1},
             mixin_key,
         )
         response = session.get(
@@ -903,7 +911,9 @@ class SniffThread(QThread):
                     return
 
             if site == 'bilibili':
-                success, message, formats = self.run_bilibili_webpage_sniff('none')
+                success, message, formats = self.run_bilibili_webpage_sniff(
+                    choose_bilibili_web_fallback_cookie_mode(cookie_modes)
+                )
                 if success:
                     self.finished_signal.emit(True, message, formats, 'none')
                     return
@@ -956,7 +966,7 @@ class DownloadThread(QThread):
         if ext.lower() in ['.m4a', '.aac']:
             new_name = f'{base_name}{file_size_str}{ext}'
         elif ext.lower() == '.mp4':
-            format_info = next((label for label, fmt_id in self.parent().format_id_map.items() if fmt_id == self.format_id), '')
+            format_info = self.parent().get_format_label(self.format_id)
             resolution = format_info.split('/')[0] if format_info else ''
             if resolution:
                 new_name = f'{base_name}.{resolution}{ext}'
@@ -999,7 +1009,7 @@ class DownloadThread(QThread):
                 raise RuntimeError('下载已取消')
 
     def run_direct_download(self, direct_payload):
-        output_dir = os.getcwd()
+        output_dir = self.parent().get_output_dir()
         title = sanitize_filename(direct_payload.get('title') or 'bilibili_video')
         temp_paths = []
 
@@ -1064,7 +1074,6 @@ class DownloadThread(QThread):
                     pass
 
     def run_ytdlp_download(self):
-        site = detect_site(self.url)
         is_subtitle = self.format_id.startswith('subtitle:')
         if is_subtitle:
             _, subtitle_lang, subtitle_mode = self.format_id.split(':', 2)
@@ -1077,8 +1086,8 @@ class DownloadThread(QThread):
         else:
             cmd = [self.parent().get_ytdlp_command(), '-f', f'{self.format_id}+bestaudio[ext=m4a]']
 
-        if site in {'youtube', 'bilibili'}:
-            cmd.extend(get_cookie_args(self.parent().cookie_mode, self.parent().cookie_file))
+        cmd.extend(get_cookie_args(self.parent().cookie_mode, self.parent().cookie_file))
+        cmd.extend(['-P', self.parent().get_output_dir()])
 
         if is_subtitle:
             cmd.extend([self.url, '--newline'])
@@ -1247,7 +1256,7 @@ class MainWindow(QMainWindow):
         self.ffmpeg_path = resolve_ffmpeg_command()
         self.cookie_mode = 'none'
         self.manual_cookie_enabled = False
-        self.format_id_map = {}
+        self.format_label_map = {}
         self.direct_download_map = {}
         self.is_sniffing = False
 
@@ -1281,6 +1290,17 @@ class MainWindow(QMainWindow):
         format_layout.addWidget(format_label)
         format_layout.addWidget(self.format_combo)
         layout.addLayout(format_layout)
+
+        output_layout = QHBoxLayout()
+        output_layout.setContentsMargins(10, 10, 10, 0)
+        output_label = QLabel('输出地址：')
+        output_label.setFixedWidth(60)
+        self.output_path_input = QLineEdit()
+        self.output_path_input.setReadOnly(True)
+        self.output_path_input.setText(self.get_output_dir())
+        output_layout.addWidget(output_label)
+        output_layout.addWidget(self.output_path_input)
+        layout.addLayout(output_layout)
 
         # Cookies设置区域
         self.cookie_container = QWidget()
@@ -1340,11 +1360,17 @@ class MainWindow(QMainWindow):
         ffmpeg_cmd = self.get_ffmpeg_command()
         return bool(ffmpeg_cmd and os.path.exists(ffmpeg_cmd)) or bool(shutil.which('ffmpeg.exe') or shutil.which('ffmpeg'))
 
+    def get_output_dir(self):
+        return os.getcwd()
+
     def set_direct_download_payloads(self, payloads):
         self.direct_download_map = payloads or {}
 
     def get_direct_download_payload(self, format_id):
         return self.direct_download_map.get(format_id)
+
+    def get_format_label(self, format_id):
+        return self.format_label_map.get(format_id, '')
 
     def update_ytdlp(self):
         target_path = get_managed_ytdlp_path()
@@ -1373,7 +1399,7 @@ class MainWindow(QMainWindow):
         if not self.format_combo.count():
             # 清空格式选择框
             self.format_combo.clear()
-            self.format_id_map.clear()
+            self.format_label_map.clear()
             self.set_direct_download_payloads({})
             
             # 更改按钮文本和状态
@@ -1397,8 +1423,12 @@ class MainWindow(QMainWindow):
         if not self.format_combo.currentText():
             QMessageBox.warning(self, '警告', '请选择视频格式')
             return
-            
-        format_id = self.format_id_map[self.format_combo.currentText()]
+
+        current_index = self.format_combo.currentIndex()
+        format_id = self.format_combo.itemData(current_index)
+        if not format_id:
+            QMessageBox.warning(self, '警告', '当前格式无效，请重新嗅探')
+            return
 
         if not format_id.startswith('subtitle:') and not self.has_ffmpeg():
             QMessageBox.warning(self, '错误', '未找到 FFmpeg。请把 ffmpeg.exe 放到程序根目录，或安装 FFmpeg 并加入 PATH。')
@@ -1435,12 +1465,12 @@ class MainWindow(QMainWindow):
             self.progress_text.setText('视频/字幕嗅探完成')
             # 清空并更新格式选择框
             self.format_combo.clear()
-            self.format_id_map.clear()
+            self.format_label_map.clear()
             self.set_direct_download_payloads({})
             
-            for format_id, resolution in formats:
-                self.format_combo.addItem(resolution)
-                self.format_id_map[resolution] = format_id
+            for format_id, format_label in formats:
+                self.format_combo.addItem(format_label, format_id)
+                self.format_label_map[format_id] = format_label
             
             # 自动选择第一个格式
             if self.format_combo.count() > 0:
@@ -1456,7 +1486,7 @@ class MainWindow(QMainWindow):
             self.download_button.setText('开始嗅探')
             self.progress_text.setText('准备就绪')
             self.format_combo.clear()
-            self.format_id_map.clear()
+            self.format_label_map.clear()
             self.set_direct_download_payloads({})
             
             if cookie_mode == 'show_cookie_input':
@@ -1643,7 +1673,7 @@ class MainWindow(QMainWindow):
     def handle_url_change(self):
         # 清空格式选择框和相关状态
         self.format_combo.clear()
-        self.format_id_map.clear()
+        self.format_label_map.clear()
         self.set_direct_download_payloads({})
         self.cookie_mode = 'none'
         self.cookie_container.hide()
