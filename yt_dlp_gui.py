@@ -329,6 +329,22 @@ def choose_bilibili_web_fallback_cookie_mode(cookie_modes):
         return 'browser:firefox'
     return 'none'
 
+
+class OutputPathLineEdit(QLineEdit):
+    choose_dir_signal = pyqtSignal()
+    open_dir_signal = pyqtSignal()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.choose_dir_signal.emit()
+            event.accept()
+            return
+        if event.button() == Qt.MouseButton.RightButton:
+            self.open_dir_signal.emit()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
 class SniffThread(QThread):
     progress_signal = pyqtSignal(str)
     finished_signal = pyqtSignal(bool, str, list, str)
@@ -1254,6 +1270,7 @@ class MainWindow(QMainWindow):
         self.cookie_file = os.path.join(tempfile.gettempdir(), 'YouTube-Cookies.txt')
         self.ytdlp_path = resolve_ytdlp_command()
         self.ffmpeg_path = resolve_ffmpeg_command()
+        self.output_dir = os.getcwd()
         self.cookie_mode = 'none'
         self.manual_cookie_enabled = False
         self.format_label_map = {}
@@ -1295,9 +1312,11 @@ class MainWindow(QMainWindow):
         output_layout.setContentsMargins(10, 10, 10, 0)
         output_label = QLabel('输出地址：')
         output_label.setFixedWidth(60)
-        self.output_path_input = QLineEdit()
+        self.output_path_input = OutputPathLineEdit()
         self.output_path_input.setReadOnly(True)
         self.output_path_input.setText(self.get_output_dir())
+        self.output_path_input.choose_dir_signal.connect(self.choose_output_dir)
+        self.output_path_input.open_dir_signal.connect(self.open_output_dir)
         output_layout.addWidget(output_label)
         output_layout.addWidget(self.output_path_input)
         layout.addLayout(output_layout)
@@ -1361,7 +1380,32 @@ class MainWindow(QMainWindow):
         return bool(ffmpeg_cmd and os.path.exists(ffmpeg_cmd)) or bool(shutil.which('ffmpeg.exe') or shutil.which('ffmpeg'))
 
     def get_output_dir(self):
-        return os.getcwd()
+        return self.output_dir
+
+    def set_output_dir(self, output_dir):
+        if not output_dir:
+            return
+        self.output_dir = output_dir
+        self.output_path_input.setText(output_dir)
+
+    def choose_output_dir(self):
+        selected_dir = QFileDialog.getExistingDirectory(
+            self,
+            '选择输出目录',
+            self.get_output_dir(),
+        )
+        if selected_dir:
+            self.set_output_dir(selected_dir)
+
+    def open_output_dir(self):
+        output_dir = self.get_output_dir()
+        if not output_dir or not os.path.isdir(output_dir):
+            QMessageBox.warning(self, '错误', '输出目录不存在，请先重新选择。')
+            return
+        try:
+            os.startfile(output_dir)
+        except Exception as e:
+            QMessageBox.warning(self, '错误', f'打开输出目录失败：{str(e)}')
 
     def set_direct_download_payloads(self, payloads):
         self.direct_download_map = payloads or {}
