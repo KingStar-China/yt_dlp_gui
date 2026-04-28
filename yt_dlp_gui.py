@@ -345,6 +345,9 @@ class OutputPathLineEdit(QLineEdit):
             return
         super().mousePressEvent(event)
 
+    def contextMenuEvent(self, event):
+        event.accept()
+
 class SniffThread(QThread):
     progress_signal = pyqtSignal(str)
     finished_signal = pyqtSignal(bool, str, list, str)
