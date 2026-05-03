@@ -347,18 +347,62 @@ def detect_known_non_video_page(url):
 
     host = (parsed_url.netloc or '').lower()
     path = (parsed_url.path or '').lower()
+    query = urllib.parse.parse_qs(parsed_url.query or '')
 
     if 'youtube.com' in host:
+        if path == '/watch' and not query.get('v'):
+            return '该链接不是具体的 YouTube 视频页面'
         if path.startswith('/post/'):
             return '该链接是 YouTube 帖子页面，不是视频页面'
         if '/community' in path:
             return '该链接是 YouTube 社区页面，不是视频页面'
+        if path.startswith('/results'):
+            return '该链接是 YouTube 搜索结果页面，不是视频页面'
+        if path.startswith('/feed/'):
+            return '该链接是 YouTube 导航页面，不是视频页面'
+        if path.startswith('/hashtag/'):
+            return '该链接是 YouTube 话题聚合页面，不是视频页面'
+        if (
+            path.startswith('/channel/')
+            or path.startswith('/c/')
+            or path.startswith('/user/')
+            or path.startswith('/@')
+        ):
+            return '该链接是 YouTube 频道页面，不是具体视频页面'
 
+    if host.startswith('space.bilibili.com'):
+        return '该链接是 B站空间主页，不是视频页面'
+    if host.startswith('search.bilibili.com'):
+        return '该链接是 B站搜索结果页面，不是视频页面'
+    if host.startswith('t.bilibili.com'):
+        return '该链接是 B站动态页面，不是视频页面'
     if 'bilibili.com' in host:
         if path.startswith('/opus/'):
             return '该链接是 B站动态页面，不是视频页面'
         if path.startswith('/read/'):
             return '该链接是 B站专栏页面，不是视频页面'
+        if path.startswith('/v/'):
+            return '该链接是 B站分区页面，不是视频页面'
+
+    if 'douyin.com' in host:
+        if path.startswith('/user/'):
+            return '该链接是抖音用户主页，不是具体视频页面'
+        if path.startswith('/search/') or path == '/hot':
+            return '该链接是抖音搜索或导航页面，不是视频页面'
+        if path.startswith('/note/'):
+            return '该链接是抖音图文页面，不是视频页面'
+
+    if 'xiaohongshu.com' in host:
+        if path.startswith('/user/profile/'):
+            return '该链接是小红书用户主页，不是具体视频页面'
+        if path.startswith('/search_result') or path.startswith('/search'):
+            return '该链接是小红书搜索结果页面，不是视频页面'
+
+    if 'weibo.com' in host:
+        if path.startswith('/u/') or path.startswith('/p/'):
+            return '该链接是微博用户主页，不是具体视频页面'
+        if path.startswith('/search'):
+            return '该链接是微博搜索结果页面，不是视频页面'
 
     return ''
 
@@ -428,6 +472,12 @@ def check_ytdlp_url_support(ytdlp_command, url, timeout=15):
     if (
         '[youtube:tab]' in error_text
         and (' post:' in error_text or '/post/' in url.lower() or ' does not have a ' in error_text)
+    ):
+        return False, '该链接是 YouTube 非视频页面，不能直接下载'
+    if (
+        'youtube search page' in error_text
+        or 'a channel URL was given' in error_text
+        or 'a feed URL was given' in error_text
     ):
         return False, '该链接是 YouTube 非视频页面，不能直接下载'
     if (
