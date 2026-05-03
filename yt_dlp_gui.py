@@ -1727,7 +1727,9 @@ class MainWindow(QMainWindow):
         if sender is self.url_input:
             sender.clear()
             sender.paste()
-            QTimer.singleShot(0, self.start_download)
+            sender.update()
+            QApplication.processEvents()
+            QTimer.singleShot(120, self.start_download)
             return
 
         if hasattr(sender, 'toPlainText'):
