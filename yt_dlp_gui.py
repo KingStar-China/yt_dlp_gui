@@ -880,6 +880,13 @@ class SniffThread(QThread):
         lowered = (error_text or '').lower()
         if site == 'bilibili' and ('http error 412' in lowered or 'precondition failed' in lowered):
             return 'B站接口返回 412，已尝试常规嗅探'
+        if (
+            'unsupported url' in lowered
+            or 'no suitable extractor' in lowered
+            or 'unsupported site' in lowered
+            or 'is not a valid url' in lowered
+        ):
+            return '该链接不是 yt-dlp 支持的网站或链接类型'
         if 'sign in' in lowered or 'login' in lowered:
             return '目标站点需要登录态或 Cookies'
         if error_text:
