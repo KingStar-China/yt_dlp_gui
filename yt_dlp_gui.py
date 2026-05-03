@@ -339,6 +339,21 @@ def is_valid_video_url(url):
     return parsed_url.scheme in {'http', 'https'} and bool(parsed_url.netloc)
 
 
+def detect_known_non_video_page(url):
+    try:
+        parsed_url = urllib.parse.urlparse((url or '').strip())
+    except Exception:
+        return ''
+
+    host = (parsed_url.netloc or '').lower()
+    path = (parsed_url.path or '').lower()
+
+    if 'youtube.com' in host and path.startswith('/post/'):
+        return '该链接是 YouTube 帖子页面，不是视频页面'
+
+    return ''
+
+
 def check_site_accessibility(url, timeout=8):
     headers = {'User-Agent': BILIBILI_WEB_UA}
 
@@ -401,6 +416,11 @@ def check_ytdlp_url_support(ytdlp_command, url, timeout=15):
         return True, ''
 
     error_text = '\n'.join(part for part in [result.stderr, result.stdout] if part).lower()
+    if (
+        '[youtube:tab]' in error_text
+        and (' post:' in error_text or '/post/' in url.lower() or ' does not have a ' in error_text)
+    ):
+        return False, '该链接是 YouTube 非视频页面，不能直接下载'
     if (
         'unsupported url' in error_text
         or 'no suitable extractor' in error_text
@@ -1530,6 +1550,11 @@ class MainWindow(QMainWindow):
         if not is_valid_video_url(url):
             QMessageBox.warning(self, '警告', '请输入有效的视频URL（需包含 http:// 或 https://）')
             self.progress_text.setText('请输入有效的视频URL')
+            return
+        non_video_message = detect_known_non_video_page(url)
+        if non_video_message:
+            QMessageBox.warning(self, '错误', non_video_message)
+            self.progress_text.setText('该链接不是可下载的视频页面')
             return
             
         # 如果没有可用的视频格式，需要先进行嗅探
