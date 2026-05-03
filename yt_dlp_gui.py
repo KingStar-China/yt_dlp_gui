@@ -1539,7 +1539,15 @@ class MainWindow(QMainWindow):
                 self.cookie_mode = 'none'
                 QMessageBox.warning(self, '错误', message)
             elif not success:
-                QMessageBox.warning(self, '错误', message)
+                retry_box = QMessageBox(self)
+                retry_box.setWindowTitle('错误')
+                retry_box.setText(message)
+                retry_box.setIcon(QMessageBox.Icon.Warning)
+                retry_button = retry_box.addButton('再试一次', QMessageBox.ButtonRole.AcceptRole)
+                retry_box.addButton('取消', QMessageBox.ButtonRole.RejectRole)
+                retry_box.exec()
+                if retry_box.clickedButton() is retry_button:
+                    QTimer.singleShot(0, self.start_download)
             elif not formats:
                 QMessageBox.warning(self, '警告', '未找到可下载的视频格式或字幕')
 
