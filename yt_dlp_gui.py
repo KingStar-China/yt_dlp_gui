@@ -374,6 +374,43 @@ def check_site_accessibility(url, timeout=8):
         return False, f'目标网站暂时无法访问：{str(exc)}'
 
 
+def check_ytdlp_url_support(ytdlp_command, url, timeout=15):
+    if not ytdlp_command:
+        return True, ''
+
+    try:
+        result = subprocess.run(
+            [
+                ytdlp_command,
+                '--simulate',
+                '--skip-download',
+                '--no-warnings',
+                '--print',
+                'extractor_key',
+                url,
+            ],
+            capture_output=True,
+            text=True,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+            timeout=timeout,
+        )
+    except Exception:
+        return True, ''
+
+    if result.returncode == 0:
+        return True, ''
+
+    error_text = '\n'.join(part for part in [result.stderr, result.stdout] if part).lower()
+    if (
+        'unsupported url' in error_text
+        or 'no suitable extractor' in error_text
+        or 'unsupported site' in error_text
+    ):
+        return False, '该链接不是 yt-dlp 支持的网站或链接类型'
+
+    return True, ''
+
+
 class OutputPathLineEdit(QLineEdit):
     choose_dir_signal = pyqtSignal()
     open_dir_signal = pyqtSignal()
@@ -1497,6 +1534,12 @@ class MainWindow(QMainWindow):
             
         # 如果没有可用的视频格式，需要先进行嗅探
         if not self.format_combo.count():
+            is_supported, support_message = check_ytdlp_url_support(self.get_ytdlp_command(), url)
+            if not is_supported:
+                QMessageBox.warning(self, '错误', support_message)
+                self.progress_text.setText('该链接不是 yt-dlp 支持的网站或链接类型')
+                return
+
             is_accessible, accessibility_message = check_site_accessibility(url)
             if not is_accessible:
                 QMessageBox.warning(self, '错误', accessibility_message)
