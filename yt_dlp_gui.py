@@ -1534,20 +1534,20 @@ class MainWindow(QMainWindow):
             
         # 如果没有可用的视频格式，需要先进行嗅探
         if not self.format_combo.count():
-            self.progress_text.setText('正在检测链接是否受 yt-dlp 支持...')
-            QApplication.processEvents()
-            is_supported, support_message = check_ytdlp_url_support(self.get_ytdlp_command(), url)
-            if not is_supported:
-                QMessageBox.warning(self, '错误', support_message)
-                self.progress_text.setText('该链接不是 yt-dlp 支持的网站或链接类型')
-                return
-
             self.progress_text.setText('正在检测目标网站是否可访问...')
             QApplication.processEvents()
             is_accessible, accessibility_message = check_site_accessibility(url)
             if not is_accessible:
                 QMessageBox.warning(self, '错误', accessibility_message)
                 self.progress_text.setText('目标网站暂时无法访问')
+                return
+
+            self.progress_text.setText('正在检测链接是否受 yt-dlp 支持...')
+            QApplication.processEvents()
+            is_supported, support_message = check_ytdlp_url_support(self.get_ytdlp_command(), url)
+            if not is_supported:
+                QMessageBox.warning(self, '错误', support_message)
+                self.progress_text.setText('该链接不是 yt-dlp 支持的网站或链接类型')
                 return
 
             # 清空格式选择框
