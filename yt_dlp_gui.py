@@ -1551,7 +1551,15 @@ class MainWindow(QMainWindow):
         if success:
             QMessageBox.information(self, '成功', '下载完成！')
         else:
-            QMessageBox.warning(self, '错误', message)
+            retry_box = QMessageBox(self)
+            retry_box.setWindowTitle('错误')
+            retry_box.setText(message)
+            retry_box.setIcon(QMessageBox.Icon.Warning)
+            retry_button = retry_box.addButton('再试一次', QMessageBox.ButtonRole.AcceptRole)
+            retry_box.addButton('取消', QMessageBox.ButtonRole.RejectRole)
+            retry_box.exec()
+            if retry_box.clickedButton() is retry_button:
+                QTimer.singleShot(0, self.start_download)
 
     def show_about(self):
         # 创建自定义的关于对话框
