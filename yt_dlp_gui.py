@@ -348,8 +348,17 @@ def detect_known_non_video_page(url):
     host = (parsed_url.netloc or '').lower()
     path = (parsed_url.path or '').lower()
 
-    if 'youtube.com' in host and path.startswith('/post/'):
-        return '该链接是 YouTube 帖子页面，不是视频页面'
+    if 'youtube.com' in host:
+        if path.startswith('/post/'):
+            return '该链接是 YouTube 帖子页面，不是视频页面'
+        if '/community' in path:
+            return '该链接是 YouTube 社区页面，不是视频页面'
+
+    if 'bilibili.com' in host:
+        if path.startswith('/opus/'):
+            return '该链接是 B站动态页面，不是视频页面'
+        if path.startswith('/read/'):
+            return '该链接是 B站专栏页面，不是视频页面'
 
     return ''
 
