@@ -330,6 +330,14 @@ def choose_bilibili_web_fallback_cookie_mode(cookie_modes):
     return 'none'
 
 
+def is_valid_video_url(url):
+    try:
+        parsed_url = urllib.parse.urlparse((url or '').strip())
+    except Exception:
+        return False
+    return parsed_url.scheme in {'http', 'https'} and bool(parsed_url.netloc)
+
+
 class OutputPathLineEdit(QLineEdit):
     choose_dir_signal = pyqtSignal()
     open_dir_signal = pyqtSignal()
@@ -1438,6 +1446,10 @@ class MainWindow(QMainWindow):
         url = self.url_input.text().strip()
         if not url:
             QMessageBox.warning(self, '警告', '请输入视频URL')
+            return
+        if not is_valid_video_url(url):
+            QMessageBox.warning(self, '警告', '请输入有效的视频URL（需包含 http:// 或 https://）')
+            self.progress_text.setText('请输入有效的视频URL')
             return
             
         # 如果没有可用的视频格式，需要先进行嗅探
