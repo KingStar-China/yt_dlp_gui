@@ -8,6 +8,7 @@ import ctypes
 import tempfile
 import shutil
 import urllib.request
+import urllib.error
 import urllib.parse
 import json
 import gzip
@@ -336,6 +337,41 @@ def is_valid_video_url(url):
     except Exception:
         return False
     return parsed_url.scheme in {'http', 'https'} and bool(parsed_url.netloc)
+
+
+def check_site_accessibility(url, timeout=8):
+    headers = {'User-Agent': BILIBILI_WEB_UA}
+
+    if requests is not None:
+        try:
+            response = requests.get(
+                url,
+                headers=headers,
+                timeout=timeout,
+                allow_redirects=True,
+                stream=True,
+            )
+            status_code = response.status_code
+            response.close()
+            if 200 <= status_code < 400 or status_code in {401, 403}:
+                return True, ''
+            return False, f'目标网站暂时无法访问（HTTP {status_code}）'
+        except requests.RequestException as exc:
+            return False, f'目标网站暂时无法访问：{str(exc)}'
+
+    try:
+        request = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            status_code = response.getcode()
+        if 200 <= status_code < 400:
+            return True, ''
+        return False, f'目标网站暂时无法访问（HTTP {status_code}）'
+    except urllib.error.HTTPError as exc:
+        if exc.code in {401, 403}:
+            return True, ''
+        return False, f'目标网站暂时无法访问（HTTP {exc.code}）'
+    except Exception as exc:
+        return False, f'目标网站暂时无法访问：{str(exc)}'
 
 
 class OutputPathLineEdit(QLineEdit):
@@ -1454,6 +1490,12 @@ class MainWindow(QMainWindow):
             
         # 如果没有可用的视频格式，需要先进行嗅探
         if not self.format_combo.count():
+            is_accessible, accessibility_message = check_site_accessibility(url)
+            if not is_accessible:
+                QMessageBox.warning(self, '错误', accessibility_message)
+                self.progress_text.setText('目标网站暂时无法访问')
+                return
+
             # 清空格式选择框
             self.format_combo.clear()
             self.format_label_map.clear()
