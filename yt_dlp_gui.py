@@ -409,6 +409,7 @@ def detect_known_non_video_page(url):
 
 def check_site_accessibility(url, timeout=8):
     headers = {'User-Agent': BILIBILI_WEB_UA}
+    site = detect_site(url)
 
     if requests is not None:
         try:
@@ -421,7 +422,11 @@ def check_site_accessibility(url, timeout=8):
             )
             status_code = response.status_code
             response.close()
-            if 200 <= status_code < 400 or status_code in {401, 403}:
+            if (
+                200 <= status_code < 400
+                or status_code in {401, 403}
+                or (site == 'bilibili' and status_code == 412)
+            ):
                 return True, ''
             return False, f'目标网站暂时无法访问（HTTP {status_code}）'
         except requests.RequestException as exc:
@@ -435,7 +440,7 @@ def check_site_accessibility(url, timeout=8):
             return True, ''
         return False, f'目标网站暂时无法访问（HTTP {status_code}）'
     except urllib.error.HTTPError as exc:
-        if exc.code in {401, 403}:
+        if exc.code in {401, 403} or (site == 'bilibili' and exc.code == 412):
             return True, ''
         return False, f'目标网站暂时无法访问（HTTP {exc.code}）'
     except Exception as exc:
@@ -1009,6 +1014,23 @@ class SniffThread(QThread):
             return error_text.strip().splitlines()[-1]
         return '嗅探失败'
 
+    def run_preflight_checks(self):
+        self.progress_signal.emit('正在检测目标网站是否可访问...')
+        is_accessible, accessibility_message = check_site_accessibility(self.url)
+        if not self.is_running:
+            return False, '嗅探已取消'
+        if not is_accessible:
+            return False, accessibility_message
+
+        self.progress_signal.emit('正在检测链接是否受 yt-dlp 支持...')
+        is_supported, support_message = check_ytdlp_url_support(self.parent().get_ytdlp_command(), self.url)
+        if not self.is_running:
+            return False, '嗅探已取消'
+        if not is_supported:
+            return False, support_message
+
+        return True, ''
+
     def run_sniff(self, cookie_mode, allow_bilibili_web_fallback=True):
         self.available_formats = []
         self.subtitle_entries = []
@@ -1058,6 +1080,10 @@ class SniffThread(QThread):
             self.cookie_warning_message = ''
             self.cookie_required_message = ''
             site = detect_site(self.url)
+            preflight_success, preflight_message = self.run_preflight_checks()
+            if not preflight_success:
+                self.finished_signal.emit(False, preflight_message, [], 'none')
+                return
             browser_cookie_modes = ['browser:firefox', 'browser:edge', 'browser:chrome']
             cookie_modes = ['none']
             if site == 'youtube':
@@ -1618,22 +1644,6 @@ class MainWindow(QMainWindow):
             
         # 如果没有可用的视频格式，需要先进行嗅探
         if not self.format_combo.count():
-            self.progress_text.setText('正在检测目标网站是否可访问...')
-            QApplication.processEvents()
-            is_accessible, accessibility_message = check_site_accessibility(url)
-            if not is_accessible:
-                QMessageBox.warning(self, '错误', accessibility_message)
-                self.progress_text.setText('目标网站暂时无法访问')
-                return
-
-            self.progress_text.setText('正在检测链接是否受 yt-dlp 支持...')
-            QApplication.processEvents()
-            is_supported, support_message = check_ytdlp_url_support(self.get_ytdlp_command(), url)
-            if not is_supported:
-                QMessageBox.warning(self, '错误', support_message)
-                self.progress_text.setText('该链接不是 yt-dlp 支持的网站或链接类型')
-                return
-
             # 清空格式选择框
             self.format_combo.clear()
             self.format_label_map.clear()
