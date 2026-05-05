@@ -2,9 +2,7 @@ import sys
 import os
 import re
 import time
-import traceback
 import subprocess
-import ctypes
 import tempfile
 import shutil
 import urllib.request
@@ -26,16 +24,30 @@ except ImportError:
 # 导入Qt相关模块
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QLabel, QLineEdit, QPushButton,
-                             QProgressBar, QComboBox, QFileDialog, QMessageBox, QMenu,
+                             QComboBox, QFileDialog, QMessageBox, QMenu,
                              QPlainTextEdit)
 from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
-from PyQt6.QtGui import QAction, QIcon
+from PyQt6.QtGui import QIcon
 
 
 def get_runtime_dir():
     if getattr(sys, 'frozen', False):
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.abspath(__file__))
+
+
+def is_writable_directory(path):
+    return bool(path and os.path.isdir(path) and os.access(path, os.W_OK))
+
+
+def get_default_output_dir():
+    runtime_dir = get_runtime_dir()
+    user_home = os.path.expanduser('~')
+    downloads_dir = os.path.join(user_home, 'Downloads')
+    for candidate in (runtime_dir, downloads_dir, user_home, os.getcwd()):
+        if is_writable_directory(candidate):
+            return candidate
+    return runtime_dir or os.getcwd()
 
 
 def get_managed_ytdlp_path():
@@ -601,7 +613,6 @@ class SniffThread(QThread):
         self.available_formats = []
         self.subtitle_entries = []
         self.process = None
-        self.subtitle_process = None
         self.cookie_warning_message = ''
         self.cookie_required_message = ''
         self.direct_download_payloads = {}
@@ -1241,8 +1252,6 @@ class SniffThread(QThread):
         self.is_running = False
         if self.process and self.process.poll() is None:
             self.process.terminate()
-        if self.subtitle_process and self.subtitle_process.poll() is None:
-            self.subtitle_process.terminate()
 
 class DownloadThread(QThread):
     progress_signal = pyqtSignal(str)
@@ -1598,7 +1607,7 @@ class MainWindow(QMainWindow):
         self.cookie_file = cookie_path
         self.ytdlp_path = resolve_ytdlp_command()
         self.ffmpeg_path = resolve_ffmpeg_command()
-        self.output_dir = os.getcwd()
+        self.output_dir = get_default_output_dir()
         self.cookie_mode = 'none'
         self.manual_cookie_enabled = False
         self.manual_cookie_site = None
@@ -2003,88 +2012,8 @@ class MainWindow(QMainWindow):
             if retry_box.clickedButton() is retry_button:
                 QTimer.singleShot(0, self.start_download)
 
-    def show_about(self):
-        # 创建自定义的关于对话框
-        about_box = QMessageBox(self)
-        about_box.setWindowTitle('关于')
-        about_box.setText('基于yt-dlp的视频下载工具\n为了兼容我只允许它下载H.264\n主要下载YouTube和bilibili视频\n\n作者：@少昊金天氏\n\n更新时间：2026-04-29')
-        about_box.setIcon(QMessageBox.Icon.Information)
-        
-        # 设置对话框的深色标题栏
-        try:
-            # 导入必要的模块
-            from ctypes import windll, c_int, byref, sizeof
-            
-            # 设置窗口属性
-            about_box.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-            
-            # 等待对话框创建完成并获取窗口句柄
-            about_box.show()
-            hwnd = int(about_box.winId())
-            
-            # 设置深色模式
-            DWMWA_USE_IMMERSIVE_DARK_MODE = 20
-            dark_mode_value = c_int(2)  # 2表示启用深色模式
-            windll.dwmapi.DwmSetWindowAttribute(
-                hwnd, 
-                DWMWA_USE_IMMERSIVE_DARK_MODE, 
-                byref(dark_mode_value), 
-                sizeof(dark_mode_value)
-            )
-            
-            # 尝试设置标题栏颜色（仅适用于Windows 11 22H2及以上版本）
-            try:
-                # 设置标题栏颜色为深灰色 (#2b2b2b)
-                DWMWA_CAPTION_COLOR = 35
-                caption_color = c_int(0xFF2B2B2B)  # 完全不透明的深灰色
-                windll.dwmapi.DwmSetWindowAttribute(
-                    hwnd, 
-                    DWMWA_CAPTION_COLOR, 
-                    byref(caption_color), 
-                    sizeof(caption_color)
-                )
-            except Exception:
-                # 如果设置标题栏颜色失败，可能是因为系统版本不支持
-                pass
-                
-            # 隐藏对话框，稍后再显示（这样可以确保样式应用）
-            about_box.hide()
-        except Exception as e:
-            # 如果设置深色标题栏失败，记录错误但不影响程序运行
-            print(f"设置关于对话框深色标题栏失败: {e}")
-        
-        # 设置对话框的样式表，使其与主窗口风格一致
-        about_box.setStyleSheet("""
-            QMessageBox {
-                background-color: #2D2D2D;
-                color: white;
-            }
-            QLabel {
-                color: white;
-            }
-            QPushButton {
-                background-color: #3D3D3D;
-                color: white;
-                border: 1px solid #555555;
-                padding: 5px;
-                border-radius: 2px;
-            }
-            QPushButton:hover {
-                background-color: #4D4D4D;
-            }
-            QPushButton:pressed {
-                background-color: #5D5D5D;
-            }
-        """)
-        
-        # 显示对话框并等待用户关闭
-        about_box.exec()
-
-    def check_youtube_url(self):
-        self.cookie_container.hide()
-
     def on_url_text_changed(self):
-        self.check_youtube_url()
+        self.cookie_container.hide()
         self.pending_url_change = True
         self.reset_url_dependent_state(set_ready_text=not self.has_active_transfer())
         if self.has_active_transfer():
@@ -2345,15 +2274,17 @@ def main():
             }
         """)
         
-        # 创建DLL目录
-        dll_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'dll')
-        os.makedirs(dll_dir, exist_ok=True)
-    
-        
-        
-        # 优先让程序根目录和 dll 目录参与 PATH，便于找到 ffmpeg.exe / 相关 DLL
         runtime_dir = get_runtime_dir()
-        os.environ['PATH'] = runtime_dir + os.pathsep + dll_dir + os.pathsep + os.environ.get('PATH', '')
+        path_entries = [runtime_dir]
+        dll_dir = os.path.join(runtime_dir, 'dll')
+        try:
+            os.makedirs(dll_dir, exist_ok=True)
+            path_entries.append(dll_dir)
+        except OSError:
+            pass
+
+        # 优先让程序根目录和 dll 目录参与 PATH，便于找到 ffmpeg.exe / 相关 DLL
+        os.environ['PATH'] = os.pathsep.join(path_entries + [os.environ.get('PATH', '')])
 
         window = MainWindow()
         window.show()
