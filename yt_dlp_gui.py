@@ -1297,11 +1297,14 @@ class DownloadThread(QThread):
         else:
             new_name = downloaded_file
 
+        if new_name == downloaded_file:
+            return
+
+        target_path = ensure_unique_path(new_name)
         try:
-            if new_name != downloaded_file:
-                os.rename(downloaded_file, new_name)
-        except Exception as e:
-            print(f'重命名文件失败：{str(e)}')
+            os.replace(downloaded_file, target_path)
+        except OSError as exc:
+            raise RuntimeError(f'下载完成但重命名失败：{str(exc)}')
 
     def download_url_to_file(self, url, target_path, headers):
         request = urllib.request.Request(url, headers=headers or {})
@@ -1412,6 +1415,7 @@ class DownloadThread(QThread):
         is_subtitle = self.format_id.startswith('subtitle:')
         is_audio_only = format_metadata.get('kind') == 'audio'
         is_progressive_video = format_metadata.get('kind') == 'video' and format_metadata.get('has_audio')
+        os.makedirs(self.parent().get_output_dir(), exist_ok=True)
         if is_subtitle:
             _, subtitle_lang, subtitle_mode = self.format_id.split(':', 2)
             cmd = [self.parent().get_ytdlp_command()]
