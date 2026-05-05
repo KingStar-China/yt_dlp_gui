@@ -122,6 +122,10 @@ def host_matches(hostname, domain):
     return normalized_host == normalized_domain or normalized_host.endswith(f'.{normalized_domain}')
 
 
+def normalize_cookie_domain(domain):
+    return str(domain or '').lower().lstrip('.').strip()
+
+
 def detect_site(url):
     hostname = extract_url_hostname(url)
     if host_matches(hostname, 'youtube.com') or host_matches(hostname, 'youtu.be'):
@@ -311,20 +315,32 @@ def load_firefox_cookie_records(domain_keywords=None):
         except Exception:
             pass
 
-    cookie_records = []
+    now = int(time.time())
+    normalized_keywords = [
+        normalize_cookie_domain(keyword)
+        for keyword in (domain_keywords or [])
+        if normalize_cookie_domain(keyword)
+    ]
+    cookie_records = {}
     for name, value, host, path, expiry, is_secure in rows:
-        host_text = str(host or '')
-        if domain_keywords and not any(keyword in host_text for keyword in domain_keywords):
+        host_text = normalize_cookie_domain(host)
+        if not name or value is None or not host_text:
             continue
-        cookie_records.append({
+        expires_at = int(expiry) if expiry else None
+        if expires_at and expires_at < now:
+            continue
+        if normalized_keywords and not any(host_matches(host_text, keyword) for keyword in normalized_keywords):
+            continue
+        record_key = (str(name), host_text, path or '/')
+        cookie_records[record_key] = {
             'name': name,
             'value': value,
             'domain': host_text,
             'path': path or '/',
-            'expires': int(expiry) if expiry else None,
+            'expires': expires_at,
             'secure': bool(is_secure),
-        })
-    return cookie_records
+        }
+    return list(cookie_records.values())
 
 
 def cookie_records_from_cookie_jar(cookie_jar):
@@ -350,9 +366,14 @@ def build_cookie_header_from_records(cookie_records, url):
     is_https = parsed_url.scheme.lower() == 'https'
     now = int(time.time())
     cookie_pairs = []
+    sorted_records = sorted(
+        cookie_records or [],
+        key=lambda cookie: len(str(cookie.get('path') or '/')),
+        reverse=True,
+    )
 
-    for cookie in cookie_records or []:
-        domain = cookie.get('domain')
+    for cookie in sorted_records:
+        domain = normalize_cookie_domain(cookie.get('domain'))
         path = cookie.get('path') or '/'
         expires = cookie.get('expires')
         if expires and int(expires) < now:
@@ -1551,7 +1572,19 @@ class UpdateYtDlpThread(QThread):
     def download_file(self, download_url, target_path, timeout=30):
         request = urllib.request.Request(download_url, headers={'User-Agent': 'yt_dlp_gui'})
         with urllib.request.urlopen(request, timeout=timeout) as response, open(target_path, 'wb') as output_file:
-            shutil.copyfileobj(response, output_file)
+            total = response.headers.get('Content-Length')
+            total_bytes = int(total) if total and total.isdigit() else 0
+            downloaded = 0
+
+            while True:
+                chunk = response.read(1024 * 256)
+                if not chunk:
+                    break
+                output_file.write(chunk)
+                downloaded += len(chunk)
+
+            if total_bytes and downloaded != total_bytes:
+                raise RuntimeError('yt-dlp 更新下载不完整，请重试')
 
     def run(self):
         download_url = 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe'
