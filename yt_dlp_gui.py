@@ -430,11 +430,11 @@ def detect_known_non_video_page(url):
     except Exception:
         return ''
 
-    host = (parsed_url.netloc or '').lower()
+    host = extract_url_hostname(url)
     path = (parsed_url.path or '').lower()
     query = urllib.parse.parse_qs(parsed_url.query or '')
 
-    if 'youtube.com' in host:
+    if host_matches(host, 'youtube.com'):
         if path == '/watch' and not query.get('v'):
             return '该链接不是具体的 YouTube 视频页面'
         if path.startswith('/post/'):
@@ -447,29 +447,20 @@ def detect_known_non_video_page(url):
             return '该链接是 YouTube 导航页面，不是视频页面'
         if path.startswith('/hashtag/'):
             return '该链接是 YouTube 话题聚合页面，不是视频页面'
-        if (
-            path.startswith('/channel/')
-            or path.startswith('/c/')
-            or path.startswith('/user/')
-            or path.startswith('/@')
-        ):
-            return '该链接是 YouTube 频道页面，不是具体视频页面'
 
-    if host.startswith('space.bilibili.com'):
+    if host_matches(host, 'space.bilibili.com'):
         return '该链接是 B站空间主页，不是视频页面'
-    if host.startswith('search.bilibili.com'):
+    if host_matches(host, 'search.bilibili.com'):
         return '该链接是 B站搜索结果页面，不是视频页面'
-    if host.startswith('t.bilibili.com'):
+    if host_matches(host, 't.bilibili.com'):
         return '该链接是 B站动态页面，不是视频页面'
-    if 'bilibili.com' in host:
+    if host_matches(host, 'bilibili.com'):
         if path.startswith('/opus/'):
             return '该链接是 B站动态页面，不是视频页面'
         if path.startswith('/read/'):
             return '该链接是 B站专栏页面，不是视频页面'
-        if path.startswith('/v/'):
-            return '该链接是 B站分区页面，不是视频页面'
 
-    if 'douyin.com' in host:
+    if host_matches(host, 'douyin.com'):
         if path.startswith('/user/'):
             return '该链接是抖音用户主页，不是具体视频页面'
         if path.startswith('/search/') or path == '/hot':
@@ -477,14 +468,14 @@ def detect_known_non_video_page(url):
         if path.startswith('/note/'):
             return '该链接是抖音图文页面，不是视频页面'
 
-    if 'xiaohongshu.com' in host:
+    if host_matches(host, 'xiaohongshu.com'):
         if path.startswith('/user/profile/'):
             return '该链接是小红书用户主页，不是具体视频页面'
         if path.startswith('/search_result') or path.startswith('/search'):
             return '该链接是小红书搜索结果页面，不是视频页面'
 
-    if 'weibo.com' in host:
-        if path.startswith('/u/') or path.startswith('/p/'):
+    if host_matches(host, 'weibo.com'):
+        if path.startswith('/u/'):
             return '该链接是微博用户主页，不是具体视频页面'
         if path.startswith('/search'):
             return '该链接是微博搜索结果页面，不是视频页面'
@@ -495,6 +486,7 @@ def detect_known_non_video_page(url):
 def check_site_accessibility(url, timeout=8):
     headers = {'User-Agent': BILIBILI_WEB_UA}
     site = detect_site(url)
+    acceptable_status_codes = {401, 403, 405, 406, 429}
 
     if requests is not None:
         try:
@@ -509,7 +501,7 @@ def check_site_accessibility(url, timeout=8):
             response.close()
             if (
                 200 <= status_code < 400
-                or status_code in {401, 403}
+                or status_code in acceptable_status_codes
                 or (site == 'bilibili' and status_code == 412)
             ):
                 return True, ''
@@ -525,7 +517,7 @@ def check_site_accessibility(url, timeout=8):
             return True, ''
         return False, f'目标网站暂时无法访问（HTTP {status_code}）'
     except urllib.error.HTTPError as exc:
-        if exc.code in {401, 403} or (site == 'bilibili' and exc.code == 412):
+        if exc.code in acceptable_status_codes or (site == 'bilibili' and exc.code == 412):
             return True, ''
         return False, f'目标网站暂时无法访问（HTTP {exc.code}）'
     except Exception as exc:
@@ -1614,6 +1606,10 @@ class MainWindow(QMainWindow):
         self.format_metadata_map = {}
         self.direct_download_map = {}
         self.is_sniffing = False
+        self.pending_url_change = False
+        self.url_change_timer = QTimer(self)
+        self.url_change_timer.setSingleShot(True)
+        self.url_change_timer.timeout.connect(self.handle_url_change)
 
         # 创建主窗口部件和布局
         central_widget = QWidget()
@@ -1628,8 +1624,7 @@ class MainWindow(QMainWindow):
         url_label.setFixedWidth(60)  # 固定标签宽度
         self.url_input = QLineEdit()
         self.url_input.setPlaceholderText('目录链接批量下载失败别怕，再次点击会继续下载未完成视频。')
-        self.url_input.textChanged.connect(self.check_youtube_url)
-        self.url_input.textChanged.connect(self.handle_url_change)
+        self.url_input.textChanged.connect(self.on_url_text_changed)
         self.url_input.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.url_input.customContextMenuRequested.connect(self.show_context_menu)
         url_layout.addWidget(url_label)
@@ -1755,6 +1750,17 @@ class MainWindow(QMainWindow):
     def get_format_metadata(self, format_id):
         return self.format_metadata_map.get(format_id, {})
 
+    def reset_url_dependent_state(self, set_ready_text=True):
+        self.format_combo.clear()
+        self.format_label_map.clear()
+        self.format_metadata_map.clear()
+        self.set_direct_download_payloads({})
+        self.cookie_mode = 'none'
+        self.cookie_container.hide()
+        self.download_button.setText('开始嗅探')
+        if set_ready_text:
+            self.progress_text.setText('准备就绪')
+
     def has_manual_cookie(self):
         has_file = bool(self.cookie_file and os.path.exists(self.cookie_file))
         if not has_file:
@@ -1822,6 +1828,9 @@ class MainWindow(QMainWindow):
         if self.update_thread and self.update_thread.isRunning():
             QMessageBox.warning(self, '提示', 'yt-dlp 正在更新中，请等待更新完成后再试。')
             return
+        if self.url_change_timer.isActive():
+            self.url_change_timer.stop()
+            self.pending_url_change = False
         url = self.url_input.text().strip()
         if not url:
             QMessageBox.warning(self, '警告', '请输入视频URL')
@@ -1903,11 +1912,15 @@ class MainWindow(QMainWindow):
             return
         if isinstance(sender_thread, DownloadThread) and sender_thread is not self.download_thread:
             return
+        if self.pending_url_change:
+            return
         self.progress_text.setText(text)
 
     def sniff_finished(self, success, message, formats, cookie_mode):
         sender_thread = self.sender()
         if isinstance(sender_thread, SniffThread) and sender_thread is not self.sniff_thread:
+            return
+        if self.pending_url_change:
             return
         self.is_sniffing = False
         self.sniff_thread = None
@@ -1969,6 +1982,8 @@ class MainWindow(QMainWindow):
     def download_finished(self, success, message):
         sender_thread = self.sender()
         if isinstance(sender_thread, DownloadThread) and sender_thread is not self.download_thread:
+            return
+        if self.pending_url_change:
             return
         self.download_thread = None
         self.download_button.setEnabled(True)  # 恢复按钮为可用状态
@@ -2068,6 +2083,16 @@ class MainWindow(QMainWindow):
     def check_youtube_url(self):
         self.cookie_container.hide()
 
+    def on_url_text_changed(self):
+        self.check_youtube_url()
+        self.pending_url_change = True
+        self.reset_url_dependent_state(set_ready_text=not self.has_active_transfer())
+        if self.has_active_transfer():
+            self.progress_text.setText('链接已变更，正在停止当前任务...')
+        self.download_button.setEnabled(True)
+        self.is_sniffing = False
+        self.url_change_timer.start(250)
+
     def save_cookie(self):
         try:
             cookie_content = self.cookie_input.toPlainText().strip()
@@ -2094,6 +2119,9 @@ class MainWindow(QMainWindow):
         sender = self.sender()
 
         if sender is self.url_input:
+            if self.url_change_timer.isActive():
+                self.url_change_timer.stop()
+                self.pending_url_change = False
             sender.clear()
             sender.paste()
             sender.update()
@@ -2154,25 +2182,22 @@ class MainWindow(QMainWindow):
             self.cleanup_manual_cookie_file()
 
     def handle_url_change(self):
-        # 清空格式选择框和相关状态
-        self.format_combo.clear()
-        self.format_label_map.clear()
-        self.format_metadata_map.clear()
-        self.set_direct_download_payloads({})
-        self.cookie_mode = 'none'
-        self.cookie_container.hide()
-        self.download_button.setText('开始嗅探')
-        self.progress_text.setText('准备就绪')
-        
-        # 如果正在进行嗅探或下载，停止它们
-        if self.sniff_thread and self.sniff_thread.isRunning():
-            self.sniff_thread.stop()
-            self.sniff_thread.wait(1000)
-        
-        if self.download_thread and self.download_thread.isRunning():
-            self.download_thread.stop()
-            self.download_thread.wait(1000)
-        
+        if not self.pending_url_change:
+            return
+        self.pending_url_change = False
+
+        sniff_thread = self.sniff_thread
+        download_thread = self.download_thread
+        self.sniff_thread = None
+        self.download_thread = None
+
+        if sniff_thread and sniff_thread.isRunning():
+            self.stop_worker_thread(sniff_thread, 1000)
+
+        if download_thread and download_thread.isRunning():
+            self.stop_worker_thread(download_thread, 1000)
+
+        self.reset_url_dependent_state(set_ready_text=True)
         self.download_button.setEnabled(True)
         self.is_sniffing = False
 
