@@ -171,7 +171,10 @@ def load_cookie_jar_from_file(cookie_file):
     if not cookie_file or not os.path.exists(cookie_file):
         return None
     cookie_jar = MozillaCookieJar()
-    cookie_jar.load(cookie_file, ignore_discard=True, ignore_expires=True)
+    try:
+        cookie_jar.load(cookie_file, ignore_discard=True, ignore_expires=True)
+    except Exception as exc:
+        raise ValueError(f'Cookies 文件格式无效：{str(exc)}')
     return cookie_jar
 
 
@@ -535,6 +538,7 @@ class SniffThread(QThread):
         self.cookie_warning_message = ''
         self.cookie_required_message = ''
         self.direct_download_payloads = {}
+        self.format_metadata = {}
 
     def build_sniff_cmd(self, cookie_mode):
         cmd = [
@@ -597,10 +601,12 @@ class SniffThread(QThread):
                 subtitle_info += f"/{','.join(exts)}"
             if not any(existing_id == subtitle_id for existing_id, _ in self.subtitle_entries):
                 self.subtitle_entries.append((subtitle_id, subtitle_info))
+                self.format_metadata[subtitle_id] = {'kind': 'subtitle'}
 
     def populate_formats_from_info(self, info):
         self.available_formats = []
         self.subtitle_entries = []
+        self.format_metadata = {}
         video_candidates = []
         audio_candidates = []
 
@@ -638,6 +644,7 @@ class SniffThread(QThread):
                 'resolution': resolution,
                 'codec_label': codec_label,
                 'codec_priority': codec_priority,
+                'has_audio': acodec != 'none',
                 'fps': fps or 0,
                 'bandwidth': fmt.get('tbr') or 0,
                 'filesize': filesize,
@@ -656,6 +663,10 @@ class SniffThread(QThread):
                 format_info += f'/{size_label}'
 
             self.available_formats.append((candidate['format_id'], format_info))
+            self.format_metadata[candidate['format_id']] = {
+                'kind': 'video',
+                'has_audio': bool(candidate.get('has_audio')),
+            }
 
         if audio_candidates:
             best_audio = max(
@@ -671,6 +682,7 @@ class SniffThread(QThread):
             if size_label:
                 audio_label += f'/{size_label}'
             self.available_formats.append((best_audio['format_id'], audio_label))
+            self.format_metadata[best_audio['format_id']] = {'kind': 'audio'}
 
         self.add_subtitle_group(info.get('subtitles'), 'manual')
         self.add_subtitle_group(info.get('automatic_captions'), 'auto')
@@ -1045,6 +1057,7 @@ class SniffThread(QThread):
         self.subtitle_entries = []
         self.cookie_warning_message = ''
         self.direct_download_payloads = {}
+        self.format_metadata = {}
         site = detect_site(self.url)
         process = subprocess.Popen(
             self.build_sniff_cmd(cookie_mode),
@@ -1095,18 +1108,19 @@ class SniffThread(QThread):
                 return
             browser_cookie_modes = ['browser:firefox', 'browser:edge', 'browser:chrome']
             cookie_modes = ['none']
+            has_manual_cookie = self.parent().has_manual_cookie_for_site(site)
             if site == 'youtube':
-                if self.parent().manual_cookie_enabled and os.path.exists(self.parent().cookie_file):
+                if has_manual_cookie:
                     cookie_modes = ['file'] + browser_cookie_modes + ['none']
                 else:
                     cookie_modes = browser_cookie_modes + ['none']
             elif site == 'bilibili':
-                if self.parent().manual_cookie_enabled and os.path.exists(self.parent().cookie_file):
+                if has_manual_cookie:
                     cookie_modes = ['file'] + browser_cookie_modes + ['none']
                 else:
                     cookie_modes = browser_cookie_modes + ['none']
             else:
-                if self.parent().manual_cookie_enabled and os.path.exists(self.parent().cookie_file):
+                if has_manual_cookie:
                     cookie_modes = ['file', 'none'] + browser_cookie_modes
                 else:
                     cookie_modes = ['none'] + browser_cookie_modes
@@ -1139,11 +1153,11 @@ class SniffThread(QThread):
                     return
                 last_message = message
 
-            if site == 'youtube' and not self.parent().manual_cookie_enabled:
+            if site == 'youtube' and not has_manual_cookie:
                 self.finished_signal.emit(False, '嗅探失败，需要浏览器登录或者手动填写Cookie（推荐火狐登录成功率更高）。', [], 'show_cookie_input')
                 return
 
-            if site == 'bilibili' and not self.parent().manual_cookie_enabled:
+            if site == 'bilibili' and not has_manual_cookie:
                 self.finished_signal.emit(False, '嗅探失败，需要浏览器登录或者手动填写Cookie（推荐火狐登录成功率更高）。', [], 'show_cookie_input')
                 return
 
@@ -1306,7 +1320,10 @@ class DownloadThread(QThread):
                     pass
 
     def run_ytdlp_download(self):
+        format_metadata = self.parent().get_format_metadata(self.format_id)
         is_subtitle = self.format_id.startswith('subtitle:')
+        is_audio_only = format_metadata.get('kind') == 'audio'
+        is_progressive_video = format_metadata.get('kind') == 'video' and format_metadata.get('has_audio')
         if is_subtitle:
             _, subtitle_lang, subtitle_mode = self.format_id.split(':', 2)
             cmd = [self.parent().get_ytdlp_command()]
@@ -1315,6 +1332,8 @@ class DownloadThread(QThread):
             else:
                 cmd.append('--write-sub')
             cmd.extend(['--sub-lang', subtitle_lang, '--convert-subs', 'srt', '--skip-download'])
+        elif is_audio_only or is_progressive_video:
+            cmd = [self.parent().get_ytdlp_command(), '-f', self.format_id]
         else:
             cmd = [self.parent().get_ytdlp_command(), '-f', f'{self.format_id}+bestaudio[ext=m4a]']
 
@@ -1322,6 +1341,8 @@ class DownloadThread(QThread):
         cmd.extend(['-P', self.parent().get_output_dir()])
 
         if is_subtitle:
+            cmd.extend([self.url, '--newline'])
+        elif is_audio_only or is_progressive_video:
             cmd.extend([self.url, '--newline'])
         else:
             cmd.extend(['--merge-output-format', 'mp4', self.url, '--newline'])
@@ -1403,9 +1424,15 @@ class UpdateYtDlpThread(QThread):
             data = json.loads(response.read().decode('utf-8'))
         return str(data.get('tag_name', '')).strip() or None
 
+    def download_file(self, download_url, target_path, timeout=30):
+        request = urllib.request.Request(download_url, headers={'User-Agent': 'yt_dlp_gui'})
+        with urllib.request.urlopen(request, timeout=timeout) as response, open(target_path, 'wb') as output_file:
+            shutil.copyfileobj(response, output_file)
+
     def run(self):
-        temp_path = self.target_path + '.download'
         download_url = 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe'
+        temp_file = None
+        temp_path = None
         try:
             local_version = self.get_local_version()
             latest_version = self.get_latest_version()
@@ -1414,8 +1441,17 @@ class UpdateYtDlpThread(QThread):
                 self.finished_signal.emit(True, f'无需更新，已经是最新版啦：{local_version}')
                 return
 
-            os.makedirs(os.path.dirname(self.target_path), exist_ok=True)
-            urllib.request.urlretrieve(download_url, temp_path)
+            target_dir = os.path.dirname(self.target_path)
+            os.makedirs(target_dir, exist_ok=True)
+            temp_file = tempfile.NamedTemporaryFile(
+                delete=False,
+                dir=target_dir,
+                prefix='yt-dlp-',
+                suffix='.download',
+            )
+            temp_path = temp_file.name
+            temp_file.close()
+            self.download_file(download_url, temp_path)
             os.replace(temp_path, self.target_path)
 
             final_version = latest_version or self.get_local_version() or '未知版本'
@@ -1481,13 +1517,21 @@ class MainWindow(QMainWindow):
         self.download_thread = None
         self.sniff_thread = None
         self.update_thread = None
-        self.cookie_file = os.path.join(tempfile.gettempdir(), 'YouTube-Cookies.txt')
+        cookie_fd, cookie_path = tempfile.mkstemp(prefix='yt_dlp_gui_cookie_', suffix='.txt')
+        os.close(cookie_fd)
+        try:
+            os.remove(cookie_path)
+        except OSError:
+            pass
+        self.cookie_file = cookie_path
         self.ytdlp_path = resolve_ytdlp_command()
         self.ffmpeg_path = resolve_ffmpeg_command()
         self.output_dir = os.getcwd()
         self.cookie_mode = 'none'
         self.manual_cookie_enabled = False
+        self.manual_cookie_site = None
         self.format_label_map = {}
+        self.format_metadata_map = {}
         self.direct_download_map = {}
         self.is_sniffing = False
 
@@ -1628,6 +1672,29 @@ class MainWindow(QMainWindow):
     def get_format_label(self, format_id):
         return self.format_label_map.get(format_id, '')
 
+    def get_format_metadata(self, format_id):
+        return self.format_metadata_map.get(format_id, {})
+
+    def has_manual_cookie(self):
+        has_file = bool(self.cookie_file and os.path.exists(self.cookie_file))
+        if not has_file:
+            self.manual_cookie_enabled = False
+        return bool(self.manual_cookie_enabled and has_file)
+
+    def has_manual_cookie_for_site(self, site):
+        if not self.has_manual_cookie():
+            return False
+        return self.manual_cookie_site in {None, site}
+
+    def cleanup_manual_cookie_file(self):
+        if self.cookie_file and os.path.exists(self.cookie_file):
+            try:
+                os.remove(self.cookie_file)
+            except OSError:
+                pass
+        self.manual_cookie_enabled = False
+        self.manual_cookie_site = None
+
     def stop_worker_thread(self, thread, timeout_ms=1000):
         if not thread or not thread.isRunning():
             return True
@@ -1697,6 +1764,7 @@ class MainWindow(QMainWindow):
             # 清空格式选择框
             self.format_combo.clear()
             self.format_label_map.clear()
+            self.format_metadata_map.clear()
             self.set_direct_download_payloads({})
             
             # 更改按钮文本和状态
@@ -1724,9 +1792,12 @@ class MainWindow(QMainWindow):
             return
 
         direct_payload = self.get_direct_download_payload(format_id)
+        format_metadata = self.get_format_metadata(format_id)
         needs_ffmpeg = (
             not format_id.startswith('subtitle:')
             and not (direct_payload and direct_payload.get('type') == 'bilibili_direct_audio')
+            and format_metadata.get('kind') != 'audio'
+            and not (format_metadata.get('kind') == 'video' and format_metadata.get('has_audio'))
         )
         if needs_ffmpeg and not self.has_ffmpeg():
             QMessageBox.warning(self, '错误', '未找到 FFmpeg。请把 ffmpeg.exe 放到程序根目录，或安装 FFmpeg 并加入 PATH。')
@@ -1772,7 +1843,9 @@ class MainWindow(QMainWindow):
             # 清空并更新格式选择框
             self.format_combo.clear()
             self.format_label_map.clear()
+            self.format_metadata_map.clear()
             self.set_direct_download_payloads(direct_download_payloads)
+            self.format_metadata_map.update(getattr(sender_thread, 'format_metadata', {}))
             
             for format_id, format_label in formats:
                 self.format_combo.addItem(format_label, format_id)
@@ -1793,6 +1866,7 @@ class MainWindow(QMainWindow):
             self.progress_text.setText('准备就绪')
             self.format_combo.clear()
             self.format_label_map.clear()
+            self.format_metadata_map.clear()
             self.set_direct_download_payloads({})
             
             if cookie_mode == 'show_cookie_input':
@@ -1923,13 +1997,17 @@ class MainWindow(QMainWindow):
             
             with open(self.cookie_file, 'w', encoding='utf-8') as f:
                 f.write(cookie_content)
+            load_cookie_jar_from_file(self.cookie_file)
             
             self.manual_cookie_enabled = True
+            site = detect_site(self.url_input.text().strip())
+            self.manual_cookie_site = site if site in {'youtube', 'bilibili'} else None
             self.cookie_mode = 'file'
             self.cookie_container.hide()
             QMessageBox.information(self, '成功', 'Cookies已更新，请重新点击开始嗅探。')
             self.cookie_input.clear()
         except Exception as e:
+            self.cleanup_manual_cookie_file()
             QMessageBox.warning(self, '警告', f'Cookies更新失败：{str(e)}')
 
     def show_context_menu(self, pos):
@@ -1987,16 +2065,19 @@ class MainWindow(QMainWindow):
                     return
 
                 event.accept()
+                self.cleanup_manual_cookie_file()
             else:
                 event.ignore()
                 return
         else:
             event.accept()
+            self.cleanup_manual_cookie_file()
 
     def handle_url_change(self):
         # 清空格式选择框和相关状态
         self.format_combo.clear()
         self.format_label_map.clear()
+        self.format_metadata_map.clear()
         self.set_direct_download_payloads({})
         self.cookie_mode = 'none'
         self.cookie_container.hide()
