@@ -637,6 +637,19 @@ class SniffThread(QThread):
         cmd.append(self.url)
         return cmd
 
+    def build_cookie_modes(self, site):
+        browser_cookie_modes = ['browser:firefox', 'browser:edge', 'browser:chrome']
+        has_manual_cookie = self.parent().has_manual_cookie_for_site(site)
+
+        if site in {'youtube', 'bilibili'}:
+            if has_manual_cookie:
+                return ['file'] + browser_cookie_modes + ['none'], has_manual_cookie
+            return browser_cookie_modes + ['none'], has_manual_cookie
+
+        if has_manual_cookie:
+            return ['file', 'none'] + browser_cookie_modes, has_manual_cookie
+        return ['none'] + browser_cookie_modes, has_manual_cookie
+
     def parse_info_json(self, output):
         text = (output or '').strip()
         if not text:
@@ -989,8 +1002,8 @@ class SniffThread(QThread):
                         return None
         return None
 
-    def run_bilibili_webpage_sniff(self, cookie_mode):
-        self.progress_signal.emit('yt-dlp 被 B站 412 拦截，正在尝试网页直连嗅探...')
+    def run_bilibili_webpage_sniff(self, cookie_mode, reason='412'):
+        self.progress_signal.emit(self.get_bilibili_web_sniff_message(reason))
         self.available_formats = []
         self.subtitle_entries = []
 
@@ -1126,13 +1139,16 @@ class SniffThread(QThread):
             return error_text.strip().splitlines()[-1]
         return '嗅探失败'
 
-    def run_preflight_checks(self):
+    def run_preflight_checks(self, site):
         self.progress_signal.emit('正在检测目标网站是否可访问...')
         is_accessible, accessibility_message = check_site_accessibility(self.url)
         if not self.is_running:
             return False, '嗅探已取消'
         if not is_accessible:
             return False, accessibility_message
+
+        if site in {'youtube', 'bilibili'}:
+            return True, ''
 
         self.progress_signal.emit('正在检测链接是否受 yt-dlp 支持...')
         is_supported, support_message = check_ytdlp_url_support(self.parent().get_ytdlp_command(), self.url)
@@ -1142,6 +1158,16 @@ class SniffThread(QThread):
             return False, support_message
 
         return True, ''
+
+    def get_bilibili_web_sniff_message(self, reason):
+        if reason == '412':
+            message = 'yt-dlp 被 B站 412 拦截，正在尝试网页直连嗅探...'
+        else:
+            message = '常规嗅探失败，正在尝试 B站网页直连嗅探...'
+
+        if requests is None:
+            message += '\n当前环境缺少 requests，网页/API 回退能力受限。'
+        return message
 
     def run_sniff(self, cookie_mode, allow_bilibili_web_fallback=True):
         self.available_formats = []
@@ -1184,7 +1210,7 @@ class SniffThread(QThread):
 
         combined_error = '\n'.join(part for part in [error_output, output] if part).strip()
         if allow_bilibili_web_fallback and site == 'bilibili' and ('HTTP Error 412' in combined_error or 'Precondition Failed' in combined_error):
-            return self.run_bilibili_webpage_sniff(cookie_mode)
+            return self.run_bilibili_webpage_sniff(cookie_mode, reason='412')
 
         return False, self.normalize_error_message(site, combined_error), []
 
@@ -1192,28 +1218,11 @@ class SniffThread(QThread):
         try:
             self.cookie_warning_message = ''
             site = detect_site(self.url)
-            preflight_success, preflight_message = self.run_preflight_checks()
+            preflight_success, preflight_message = self.run_preflight_checks(site)
             if not preflight_success:
                 self.finished_signal.emit(False, preflight_message, [], 'none')
                 return
-            browser_cookie_modes = ['browser:firefox', 'browser:edge', 'browser:chrome']
-            cookie_modes = ['none']
-            has_manual_cookie = self.parent().has_manual_cookie_for_site(site)
-            if site == 'youtube':
-                if has_manual_cookie:
-                    cookie_modes = ['file'] + browser_cookie_modes + ['none']
-                else:
-                    cookie_modes = browser_cookie_modes + ['none']
-            elif site == 'bilibili':
-                if has_manual_cookie:
-                    cookie_modes = ['file'] + browser_cookie_modes + ['none']
-                else:
-                    cookie_modes = browser_cookie_modes + ['none']
-            else:
-                if has_manual_cookie:
-                    cookie_modes = ['file', 'none'] + browser_cookie_modes
-                else:
-                    cookie_modes = ['none'] + browser_cookie_modes
+            cookie_modes, has_manual_cookie = self.build_cookie_modes(site)
 
             last_message = '嗅探失败'
             for index, cookie_mode in enumerate(cookie_modes):
@@ -1237,7 +1246,7 @@ class SniffThread(QThread):
 
             if site == 'bilibili':
                 fallback_cookie_mode = choose_bilibili_web_fallback_cookie_mode(cookie_modes)
-                success, message, formats = self.run_bilibili_webpage_sniff(fallback_cookie_mode)
+                success, message, formats = self.run_bilibili_webpage_sniff(fallback_cookie_mode, reason='general')
                 if success:
                     self.finished_signal.emit(True, message, formats, fallback_cookie_mode)
                     return
