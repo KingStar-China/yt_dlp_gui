@@ -3,6 +3,7 @@ import os
 import re
 import time
 import subprocess
+from collections import deque
 import tempfile
 import shutil
 import urllib.request
@@ -176,6 +177,25 @@ def ensure_unique_path(file_path):
         if not os.path.exists(candidate):
             return candidate
         index += 1
+
+
+def extract_process_error_message(lines, default_message):
+    for raw_line in reversed(list(lines or [])):
+        line = str(raw_line or '').strip()
+        if not line:
+            continue
+
+        lowered = line.lower()
+        if line.startswith('[download]') and 'error' not in lowered:
+            continue
+        if line.startswith('[info]') or line.startswith('[debug]'):
+            continue
+
+        cleaned = re.sub(r'^\s*ERROR:\s*', '', line, flags=re.IGNORECASE).strip()
+        if cleaned:
+            return f'{default_message}：{cleaned}'
+
+    return default_message
 
 
 def build_bilibili_mixin_key(img_url, sub_url):
@@ -1457,12 +1477,14 @@ class DownloadThread(QThread):
         )
         self.process = process
         downloaded_file = None
+        recent_lines = deque(maxlen=40)
 
         while self.is_running:
             line = process.stdout.readline()
             if not line:
                 break
             line = line.strip()
+            recent_lines.append(line)
             self.progress_signal.emit(line)
             if '[download] Destination:' in line:
                 downloaded_file = line.split(':', 1)[1].strip()
@@ -1474,7 +1496,8 @@ class DownloadThread(QThread):
             self.finalize_downloaded_file(downloaded_file)
             self.finished_signal.emit(True, '下载完成' if not is_subtitle else '字幕下载完成')
         else:
-            self.finished_signal.emit(False, '下载失败')
+            default_message = '字幕下载失败' if is_subtitle else '下载失败'
+            self.finished_signal.emit(False, extract_process_error_message(recent_lines, default_message))
 
     def run(self):
         try:
