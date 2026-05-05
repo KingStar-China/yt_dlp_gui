@@ -1540,6 +1540,9 @@ class DownloadThread(QThread):
                 downloaded_file = line.split('into ', 1)[1].strip().strip('"')
 
         process.wait()
+        if not self.is_running:
+            self.finished_signal.emit(False, '下载已取消')
+            return
         if process.returncode == 0:
             self.finalize_downloaded_file(downloaded_file)
             self.finished_signal.emit(True, '下载完成' if not is_subtitle else '字幕下载完成')
