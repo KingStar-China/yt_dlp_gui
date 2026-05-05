@@ -2296,19 +2296,6 @@ def main():
                 background-color: #2b2b2b; 
                 color: #ffffff; 
             }
-            /* 标题栏样式 */
-            QMainWindow::title {
-                background-color: #2b2b2b;
-                color: #ffffff;
-            }
-            QMainWindow::titleBar {
-                background-color: #2b2b2b;
-                color: #ffffff;
-            }
-            QTitleBar {
-                background-color: #2b2b2b;
-                color: #ffffff;
-            }
             QMenuBar { 
                 background-color: #2b2b2b; 
                 color: #ffffff; 
@@ -2328,9 +2315,10 @@ def main():
             QMenu {
                 background-color: #2b2b2b;
                 border: 1px solid #555555;
+                padding: 5px 0px;
             }
             QMenu::item {
-                padding: 5px 30px 5px 20px;
+                padding: 5px 20px;
                 border: 1px solid transparent;
             }
             QMenu::item:selected {
@@ -2372,22 +2360,6 @@ def main():
                 background-color: #3b3b3b; 
                 selection-background-color: #4b4b4b; 
                 border: 1px solid #555555; 
-            }
-            QMenuBar { 
-                background-color: #2b2b2b; 
-                color: #ffffff; 
-                border-bottom: 1px solid #555555; 
-            }
-            QMenuBar::item:selected, QMenu::item:selected { 
-                background-color: #3b3b3b; 
-            }
-            QMenu { 
-                background-color: #2b2b2b; 
-                border: 1px solid #555555; 
-                padding: 5px 0px; 
-            }
-            QMenu::item { 
-                padding: 5px 20px; 
             }
         """)
         
