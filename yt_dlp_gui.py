@@ -639,7 +639,7 @@ class SniffThread(QThread):
 
     def build_cookie_modes(self, site):
         browser_cookie_modes = ['browser:firefox', 'browser:edge', 'browser:chrome']
-        has_manual_cookie = self.parent().has_manual_cookie_for_site(site)
+        has_manual_cookie = self.parent().has_manual_cookie_for_url(self.url)
 
         if site in {'youtube', 'bilibili'}:
             if has_manual_cookie:
@@ -1631,6 +1631,7 @@ class MainWindow(QMainWindow):
         self.cookie_mode = 'none'
         self.manual_cookie_enabled = False
         self.manual_cookie_site = None
+        self.manual_cookie_hostname = None
         self.format_label_map = {}
         self.format_metadata_map = {}
         self.direct_download_map = {}
@@ -1796,10 +1797,16 @@ class MainWindow(QMainWindow):
             self.manual_cookie_enabled = False
         return bool(self.manual_cookie_enabled and has_file)
 
-    def has_manual_cookie_for_site(self, site):
+    def has_manual_cookie_for_url(self, url):
         if not self.has_manual_cookie():
             return False
-        return self.manual_cookie_site in {None, site}
+        site = detect_site(url)
+        hostname = extract_url_hostname(url)
+        if self.manual_cookie_site:
+            return self.manual_cookie_site == site
+        if self.manual_cookie_hostname:
+            return host_matches(hostname, self.manual_cookie_hostname)
+        return True
 
     def cleanup_manual_cookie_file(self):
         if self.cookie_file and os.path.exists(self.cookie_file):
@@ -1809,6 +1816,7 @@ class MainWindow(QMainWindow):
                 pass
         self.manual_cookie_enabled = False
         self.manual_cookie_site = None
+        self.manual_cookie_hostname = None
 
     def stop_worker_thread(self, thread, timeout_ms=1000):
         if not thread or not thread.isRunning():
@@ -2054,8 +2062,11 @@ class MainWindow(QMainWindow):
             load_cookie_jar_from_file(self.cookie_file)
             
             self.manual_cookie_enabled = True
-            site = detect_site(self.url_input.text().strip())
+            current_url = self.url_input.text().strip()
+            site = detect_site(current_url)
+            hostname = extract_url_hostname(current_url)
             self.manual_cookie_site = site if site in {'youtube', 'bilibili'} else None
+            self.manual_cookie_hostname = None if self.manual_cookie_site else (hostname or None)
             self.cookie_mode = 'file'
             self.cookie_container.hide()
             QMessageBox.information(self, '成功', 'Cookies已更新，请重新点击开始嗅探。')
