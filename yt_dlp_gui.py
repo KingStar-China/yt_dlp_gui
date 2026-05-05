@@ -1385,6 +1385,41 @@ class DownloadThread(QThread):
             if total_bytes and downloaded != total_bytes:
                 raise RuntimeError('直连下载不完整，请重试')
 
+    def run_merge_process(self, cmd):
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        self.process = process
+        output_lines = deque(maxlen=80)
+        try:
+            while self.is_running:
+                line = process.stdout.readline()
+                if not line:
+                    break
+                line = line.strip()
+                output_lines.append(line)
+                if line:
+                    self.progress_signal.emit(line)
+
+            if not self.is_running and process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+                raise RuntimeError('下载已取消')
+
+            process.wait()
+            if process.returncode != 0:
+                raise RuntimeError(extract_process_error_message(output_lines, 'FFmpeg 合并失败'))
+        finally:
+            self.process = None
+
     def run_direct_download(self, direct_payload):
         output_dir = self.parent().get_output_dir()
         os.makedirs(output_dir, exist_ok=True)
@@ -1434,15 +1469,7 @@ class DownloadThread(QThread):
                 ffmpeg_cmd.extend(['-c', 'copy', final_path])
 
             self.progress_signal.emit('正在用 FFmpeg 合并 B站音视频...')
-            result = subprocess.run(
-                ffmpeg_cmd,
-                capture_output=True,
-                text=True,
-                creationflags=subprocess.CREATE_NO_WINDOW,
-                timeout=120,
-            )
-            if result.returncode != 0:
-                raise RuntimeError((result.stderr or result.stdout or 'FFmpeg 合并失败').strip())
+            self.run_merge_process(ffmpeg_cmd)
 
             self.finalize_downloaded_file(final_path)
             success = True
