@@ -94,11 +94,26 @@ VIDEO_CODEC_PRIORITY = [
 ]
 
 
+def extract_url_hostname(url):
+    try:
+        return (urllib.parse.urlparse((url or '').strip()).hostname or '').lower()
+    except Exception:
+        return ''
+
+
+def host_matches(hostname, domain):
+    normalized_host = str(hostname or '').lower().strip('.')
+    normalized_domain = str(domain or '').lower().strip('.')
+    if not normalized_host or not normalized_domain:
+        return False
+    return normalized_host == normalized_domain or normalized_host.endswith(f'.{normalized_domain}')
+
+
 def detect_site(url):
-    lower_url = (url or '').lower()
-    if 'youtube.com' in lower_url or 'youtu.be' in lower_url:
+    hostname = extract_url_hostname(url)
+    if host_matches(hostname, 'youtube.com') or host_matches(hostname, 'youtu.be'):
         return 'youtube'
-    if 'bilibili.com' in lower_url or 'b23.tv' in lower_url:
+    if host_matches(hostname, 'bilibili.com') or host_matches(hostname, 'b23.tv'):
         return 'bilibili'
     return 'other'
 
@@ -278,6 +293,66 @@ def load_firefox_cookie_records(domain_keywords=None):
             'secure': bool(is_secure),
         })
     return cookie_records
+
+
+def cookie_records_from_cookie_jar(cookie_jar):
+    records = []
+    if cookie_jar is None:
+        return records
+    for cookie in cookie_jar:
+        records.append({
+            'name': cookie.name,
+            'value': cookie.value,
+            'domain': cookie.domain,
+            'path': cookie.path or '/',
+            'expires': cookie.expires,
+            'secure': bool(cookie.secure),
+        })
+    return records
+
+
+def build_cookie_header_from_records(cookie_records, url):
+    parsed_url = urllib.parse.urlparse((url or '').strip())
+    hostname = (parsed_url.hostname or '').lower()
+    request_path = parsed_url.path or '/'
+    is_https = parsed_url.scheme.lower() == 'https'
+    now = int(time.time())
+    cookie_pairs = []
+
+    for cookie in cookie_records or []:
+        domain = cookie.get('domain')
+        path = cookie.get('path') or '/'
+        expires = cookie.get('expires')
+        if expires and int(expires) < now:
+            continue
+        if cookie.get('secure') and not is_https:
+            continue
+        if not host_matches(hostname, domain):
+            continue
+        if not request_path.startswith(path):
+            continue
+        cookie_pairs.append(f"{cookie.get('name')}={cookie.get('value')}")
+
+    return '; '.join(cookie_pairs)
+
+
+def get_request_cookie_header(url, cookie_mode, cookie_file):
+    if cookie_mode == 'file':
+        return build_cookie_header_from_records(
+            cookie_records_from_cookie_jar(load_cookie_jar_from_file(cookie_file)),
+            url,
+        )
+
+    if cookie_mode == 'browser:firefox':
+        site = detect_site(url)
+        domain_keywords = []
+        if site == 'bilibili':
+            domain_keywords = ['bilibili.com', 'b23.tv']
+        elif site == 'youtube':
+            domain_keywords = ['youtube.com', 'youtu.be', 'google.com']
+        return build_cookie_header_from_records(load_firefox_cookie_records(domain_keywords), url)
+
+    return ''
 
 
 def get_codec_label_and_priority(codec_name):
@@ -745,6 +820,9 @@ class SniffThread(QThread):
             response.raise_for_status()
             html = response.text
         else:
+            cookie_header = get_request_cookie_header(self.url, cookie_mode, self.parent().cookie_file)
+            if cookie_header:
+                headers['Cookie'] = cookie_header
             request = urllib.request.Request(self.url, headers=headers)
             with urllib.request.urlopen(request, timeout=20) as response:
                 raw_data = response.read()
@@ -762,6 +840,8 @@ class SniffThread(QThread):
                 playinfo = self.fetch_bilibili_playinfo_from_api(session, initial_state)
             if playinfo:
                 return playinfo, initial_state
+            if requests is None and initial_state:
+                raise ValueError('当前环境缺少 requests，无法继续补拉 B站播放数据')
             if any(keyword in html for keyword in ['验证码', '安全验证', '风控', '请完成验证', 'geetest']):
                 raise ValueError('B站返回了风控/验证页面，请稍后重试或提供 Cookies')
             page_title_match = re.search(r'<title[^>]*>(.*?)</title>', html, re.IGNORECASE | re.DOTALL)
