@@ -128,6 +128,13 @@ def format_size_from_bytes(filesize):
 def sanitize_filename(filename):
     sanitized = re.sub(r'[<>:"/\\|?*]', '_', (filename or '').strip())
     sanitized = sanitized.rstrip(' .')
+    reserved_names = {
+        'con', 'prn', 'aux', 'nul',
+        'com1', 'com2', 'com3', 'com4', 'com5', 'com6', 'com7', 'com8', 'com9',
+        'lpt1', 'lpt2', 'lpt3', 'lpt4', 'lpt5', 'lpt6', 'lpt7', 'lpt8', 'lpt9',
+    }
+    if sanitized.lower() in reserved_names:
+        sanitized = f'_{sanitized}'
     return sanitized or 'video'
 
 
@@ -527,6 +534,7 @@ class SniffThread(QThread):
         self.subtitle_process = None
         self.cookie_warning_message = ''
         self.cookie_required_message = ''
+        self.direct_download_payloads = {}
 
     def build_sniff_cmd(self, cookie_mode):
         cmd = [
@@ -884,6 +892,7 @@ class SniffThread(QThread):
         self.subtitle_entries = []
 
         playinfo, initial_state = self.fetch_bilibili_page_data(cookie_mode)
+        initial_state = initial_state or {}
         playinfo_data = playinfo.get('data') or {}
         dash = playinfo_data.get('dash') or {}
         videos = dash.get('video') or []
@@ -993,7 +1002,7 @@ class SniffThread(QThread):
         if not self.available_formats:
             return False, 'B站网页已打开，但没解析到可直连的视频或 AAC 音频格式', []
 
-        self.parent().set_direct_download_payloads(download_payloads)
+        self.direct_download_payloads = download_payloads
         self.available_formats.sort(key=lambda x: RESOLUTION_SORT_ORDER.get(x[1].split('/')[0], -1), reverse=True)
         return True, 'B站网页直连嗅探完成', self.available_formats
 
@@ -1035,7 +1044,7 @@ class SniffThread(QThread):
         self.available_formats = []
         self.subtitle_entries = []
         self.cookie_warning_message = ''
-        self.parent().set_direct_download_payloads({})
+        self.direct_download_payloads = {}
         site = detect_site(self.url)
         process = subprocess.Popen(
             self.build_sniff_cmd(cookie_mode),
@@ -1123,11 +1132,10 @@ class SniffThread(QThread):
                     return
 
             if site == 'bilibili':
-                success, message, formats = self.run_bilibili_webpage_sniff(
-                    choose_bilibili_web_fallback_cookie_mode(cookie_modes)
-                )
+                fallback_cookie_mode = choose_bilibili_web_fallback_cookie_mode(cookie_modes)
+                success, message, formats = self.run_bilibili_webpage_sniff(fallback_cookie_mode)
                 if success:
-                    self.finished_signal.emit(True, message, formats, 'none')
+                    self.finished_signal.emit(True, message, formats, fallback_cookie_mode)
                     return
                 last_message = message
 
@@ -1219,11 +1227,16 @@ class DownloadThread(QThread):
 
             if not self.is_running:
                 raise RuntimeError('下载已取消')
+            if total_bytes and downloaded != total_bytes:
+                raise RuntimeError('直连下载不完整，请重试')
 
     def run_direct_download(self, direct_payload):
         output_dir = self.parent().get_output_dir()
+        os.makedirs(output_dir, exist_ok=True)
         title = sanitize_filename(direct_payload.get('title') or 'bilibili_video')
         temp_paths = []
+        final_path = None
+        success = False
 
         try:
             if direct_payload.get('type') == 'bilibili_direct_audio':
@@ -1238,6 +1251,7 @@ class DownloadThread(QThread):
                 )
                 os.replace(temp_path, final_path)
                 self.finalize_downloaded_file(final_path)
+                success = True
                 self.finished_signal.emit(True, '下载完成')
                 return
 
@@ -1276,8 +1290,14 @@ class DownloadThread(QThread):
                 raise RuntimeError((result.stderr or result.stdout or 'FFmpeg 合并失败').strip())
 
             self.finalize_downloaded_file(final_path)
+            success = True
             self.finished_signal.emit(True, '下载完成')
         finally:
+            if not success and final_path and os.path.exists(final_path):
+                try:
+                    os.remove(final_path)
+                except Exception:
+                    pass
             for temp_path in temp_paths:
                 try:
                     if os.path.exists(temp_path):
@@ -1396,8 +1416,6 @@ class UpdateYtDlpThread(QThread):
 
             os.makedirs(os.path.dirname(self.target_path), exist_ok=True)
             urllib.request.urlretrieve(download_url, temp_path)
-            if os.path.exists(self.target_path):
-                os.remove(self.target_path)
             os.replace(temp_path, self.target_path)
 
             final_version = latest_version or self.get_local_version() or '未知版本'
@@ -1610,16 +1628,42 @@ class MainWindow(QMainWindow):
     def get_format_label(self, format_id):
         return self.format_label_map.get(format_id, '')
 
+    def stop_worker_thread(self, thread, timeout_ms=1000):
+        if not thread or not thread.isRunning():
+            return True
+        stop_method = getattr(thread, 'stop', None)
+        if callable(stop_method):
+            stop_method()
+        return thread.wait(timeout_ms)
+
+    def has_active_transfer(self):
+        return bool(
+            (self.sniff_thread and self.sniff_thread.isRunning())
+            or (self.download_thread and self.download_thread.isRunning())
+        )
+
     def update_ytdlp(self):
+        if self.update_thread and self.update_thread.isRunning():
+            QMessageBox.warning(self, '提示', 'yt-dlp 正在更新中，请稍后再试。')
+            return
+        if self.has_active_transfer():
+            QMessageBox.warning(self, '提示', '请等待当前嗅探或下载完成后再更新 yt-dlp。')
+            return
         target_path = get_managed_ytdlp_path()
         self.update_ytdlp_button.setEnabled(False)
+        self.download_button.setEnabled(False)
         self.progress_text.setText('正在更新 yt-dlp...')
         self.update_thread = UpdateYtDlpThread(target_path, self.get_ytdlp_command(), self)
         self.update_thread.finished_signal.connect(self.update_ytdlp_finished)
         self.update_thread.start()
 
     def update_ytdlp_finished(self, success, message):
+        sender_thread = self.sender()
+        if isinstance(sender_thread, UpdateYtDlpThread) and sender_thread is not self.update_thread:
+            return
+        self.update_thread = None
         self.update_ytdlp_button.setEnabled(True)
+        self.download_button.setEnabled(True)
         self.get_ytdlp_command()
         self.progress_text.setText(message)
         if success:
@@ -1628,6 +1672,9 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, '错误', message)
 
     def start_download(self):
+        if self.update_thread and self.update_thread.isRunning():
+            QMessageBox.warning(self, '提示', 'yt-dlp 正在更新中，请等待更新完成后再试。')
+            return
         url = self.url_input.text().strip()
         if not url:
             QMessageBox.warning(self, '警告', '请输入视频URL')
@@ -1644,6 +1691,9 @@ class MainWindow(QMainWindow):
             
         # 如果没有可用的视频格式，需要先进行嗅探
         if not self.format_combo.count():
+            if not self.stop_worker_thread(self.sniff_thread, 2000):
+                QMessageBox.warning(self, '提示', '上一次嗅探仍在结束，请稍后再试。')
+                return
             # 清空格式选择框
             self.format_combo.clear()
             self.format_label_map.clear()
@@ -1656,10 +1706,6 @@ class MainWindow(QMainWindow):
             self.progress_text.setText('正在嗅探可下载的视频、音频和字幕...')
             
             # 启动嗅探线程
-            if self.sniff_thread and self.sniff_thread.isRunning():
-                self.sniff_thread.stop()
-                self.sniff_thread.wait(1000)
-                
             self.sniff_thread = SniffThread(url, self)
             self.sniff_thread.progress_signal.connect(self.update_progress)
             self.sniff_thread.finished_signal.connect(self.sniff_finished)
@@ -1677,15 +1723,20 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, '警告', '当前格式无效，请重新嗅探')
             return
 
-        if not format_id.startswith('subtitle:') and not self.has_ffmpeg():
+        direct_payload = self.get_direct_download_payload(format_id)
+        needs_ffmpeg = (
+            not format_id.startswith('subtitle:')
+            and not (direct_payload and direct_payload.get('type') == 'bilibili_direct_audio')
+        )
+        if needs_ffmpeg and not self.has_ffmpeg():
             QMessageBox.warning(self, '错误', '未找到 FFmpeg。请把 ffmpeg.exe 放到程序根目录，或安装 FFmpeg 并加入 PATH。')
             self.progress_text.setText('缺少 FFmpeg，无法合并视频和音频')
             return
         
         # 停止当前下载线程（如果有）
-        if self.download_thread and self.download_thread.isRunning():
-            self.download_thread.stop()
-            self.download_thread.wait(1000)
+        if not self.stop_worker_thread(self.download_thread, 2000):
+            QMessageBox.warning(self, '提示', '上一次下载仍在结束，请稍后再试。')
+            return
 
         self.download_button.setText('正在下载中')
         self.download_button.setEnabled(False)  # 设置按钮为不可用状态
@@ -1696,15 +1747,23 @@ class MainWindow(QMainWindow):
         self.download_thread.start()
 
     def update_progress(self, text):
+        sender_thread = self.sender()
+        if isinstance(sender_thread, SniffThread) and sender_thread is not self.sniff_thread:
+            return
+        if isinstance(sender_thread, DownloadThread) and sender_thread is not self.download_thread:
+            return
         self.progress_text.setText(text)
 
     def sniff_finished(self, success, message, formats, cookie_mode):
+        sender_thread = self.sender()
+        if isinstance(sender_thread, SniffThread) and sender_thread is not self.sniff_thread:
+            return
         self.is_sniffing = False
+        self.sniff_thread = None
         self.download_button.setText('开始嗅探')
         self.download_button.setEnabled(True)  # 恢复按钮为可用状态
-        cookie_warning_message = ''
-        if self.sniff_thread:
-            cookie_warning_message = getattr(self.sniff_thread, 'cookie_warning_message', '')
+        cookie_warning_message = getattr(sender_thread, 'cookie_warning_message', '')
+        direct_download_payloads = getattr(sender_thread, 'direct_download_payloads', {})
         
         if success and formats:
             self.cookie_mode = cookie_mode
@@ -1713,7 +1772,7 @@ class MainWindow(QMainWindow):
             # 清空并更新格式选择框
             self.format_combo.clear()
             self.format_label_map.clear()
-            self.set_direct_download_payloads({})
+            self.set_direct_download_payloads(direct_download_payloads)
             
             for format_id, format_label in formats:
                 self.format_combo.addItem(format_label, format_id)
@@ -1754,6 +1813,10 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, '警告', '未找到可下载的视频格式或字幕')
 
     def download_finished(self, success, message):
+        sender_thread = self.sender()
+        if isinstance(sender_thread, DownloadThread) and sender_thread is not self.download_thread:
+            return
+        self.download_thread = None
         self.download_button.setEnabled(True)  # 恢复按钮为可用状态
         self.is_sniffing = False
         self.progress_text.setText(message)
@@ -1900,6 +1963,10 @@ class MainWindow(QMainWindow):
         menu.exec(sender.mapToGlobal(pos))
 
     def closeEvent(self, event):
+        if self.update_thread and self.update_thread.isRunning():
+            QMessageBox.warning(self, '提示', 'yt-dlp 正在更新中，请等待更新完成后再退出。')
+            event.ignore()
+            return
         if (self.download_thread and self.download_thread.isRunning()) or (self.sniff_thread and self.sniff_thread.isRunning()):
             operation = '嗅探' if self.is_sniffing else '下载'
             reply = QMessageBox.question(self, '确认', f'{operation}正在进行中，确定要退出吗？',
@@ -1909,31 +1976,22 @@ class MainWindow(QMainWindow):
                 max_wait_time = 3000
                 
                 # 终止下载线程
-                if self.download_thread and self.download_thread.isRunning():
-                    self.download_thread.stop()
-                    if not self.download_thread.wait(max_wait_time):
-                        self.download_thread.terminate()
-                        self.download_thread.wait(1000)  # 再给一秒确保完全终止
+                download_stopped = self.stop_worker_thread(self.download_thread, max_wait_time)
                 
                 # 终止嗅探线程
-                if self.sniff_thread and self.sniff_thread.isRunning():
-                    self.sniff_thread.stop()
-                    if not self.sniff_thread.wait(max_wait_time):
-                        self.sniff_thread.terminate()
-                        self.sniff_thread.wait(1000)  # 再给一秒确保完全终止
-                
-                # 终止所有相关的子进程
-                try:
-                    current_pid = os.getpid()
-                    subprocess.run(['taskkill', '/F', '/T', '/PID', str(current_pid)], 
-                                 creationflags=subprocess.CREATE_NO_WINDOW,
-                                 capture_output=True)
-                except Exception as e:
-                    print(f'终止进程时出错：{str(e)}')
-                
+                sniff_stopped = self.stop_worker_thread(self.sniff_thread, max_wait_time)
+
+                if not download_stopped or not sniff_stopped:
+                    QMessageBox.warning(self, '提示', '当前任务仍在结束，请稍后再试退出。')
+                    event.ignore()
+                    return
+
                 event.accept()
             else:
                 event.ignore()
+                return
+        else:
+            event.accept()
 
     def handle_url_change(self):
         # 清空格式选择框和相关状态
