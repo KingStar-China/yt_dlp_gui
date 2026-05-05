@@ -537,13 +537,16 @@ def check_site_accessibility(url, timeout=8):
 
 
 def check_ytdlp_url_support(ytdlp_command, url, timeout=15):
-    if not ytdlp_command:
-        return True, ''
+    resolved_command = str(ytdlp_command or '').strip()
+    if not resolved_command:
+        return False, '未找到 yt-dlp，请先点击“更新 yt-dlp”。'
+    if not os.path.exists(resolved_command) and not shutil.which(resolved_command):
+        return False, '未找到 yt-dlp，请先点击“更新 yt-dlp”或确认 PATH 中存在 yt-dlp。'
 
     try:
         result = subprocess.run(
             [
-                ytdlp_command,
+                resolved_command,
                 '--simulate',
                 '--skip-download',
                 '--no-warnings',
@@ -556,8 +559,14 @@ def check_ytdlp_url_support(ytdlp_command, url, timeout=15):
             creationflags=subprocess.CREATE_NO_WINDOW,
             timeout=timeout,
         )
-    except Exception:
-        return True, ''
+    except FileNotFoundError:
+        return False, '未找到 yt-dlp，请先点击“更新 yt-dlp”或确认 PATH 中存在 yt-dlp。'
+    except subprocess.TimeoutExpired:
+        return False, '检测 yt-dlp 支持性超时，请稍后重试。'
+    except OSError as exc:
+        return False, f'调用 yt-dlp 失败：{str(exc)}'
+    except Exception as exc:
+        return False, f'检测 yt-dlp 支持性失败：{str(exc)}'
 
     if result.returncode == 0:
         return True, ''
@@ -614,7 +623,6 @@ class SniffThread(QThread):
         self.subtitle_entries = []
         self.process = None
         self.cookie_warning_message = ''
-        self.cookie_required_message = ''
         self.direct_download_payloads = {}
         self.format_metadata = {}
 
@@ -1183,7 +1191,6 @@ class SniffThread(QThread):
     def run(self):
         try:
             self.cookie_warning_message = ''
-            self.cookie_required_message = ''
             site = detect_site(self.url)
             preflight_success, preflight_message = self.run_preflight_checks()
             if not preflight_success:
