@@ -37,11 +37,52 @@ def get_runtime_dir():
     return os.path.dirname(os.path.abspath(__file__))
 
 
+def get_settings_path():
+    return os.path.join(get_runtime_dir(), 'yt_dlp_gui_settings.json')
+
+
 def is_writable_directory(path):
     return bool(path and os.path.isdir(path) and os.access(path, os.W_OK))
 
 
+def load_saved_output_dir():
+    settings_path = get_settings_path()
+    if not os.path.exists(settings_path):
+        return ''
+    try:
+        with open(settings_path, 'r', encoding='utf-8') as settings_file:
+            data = json.load(settings_file)
+        output_dir = str(data.get('output_dir') or '').strip()
+        if is_writable_directory(output_dir):
+            return output_dir
+    except Exception:
+        pass
+    return ''
+
+
+def save_output_dir(output_dir):
+    if not is_writable_directory(output_dir):
+        return
+    settings_path = get_settings_path()
+    data = {}
+    if os.path.exists(settings_path):
+        try:
+            with open(settings_path, 'r', encoding='utf-8') as settings_file:
+                loaded_data = json.load(settings_file)
+            if isinstance(loaded_data, dict):
+                data = loaded_data
+        except Exception:
+            data = {}
+    data['output_dir'] = output_dir
+    with open(settings_path, 'w', encoding='utf-8') as settings_file:
+        json.dump(data, settings_file, ensure_ascii=False, indent=2)
+
+
 def get_default_output_dir():
+    saved_output_dir = load_saved_output_dir()
+    if saved_output_dir:
+        return saved_output_dir
+
     runtime_dir = get_runtime_dir()
     user_home = os.path.expanduser('~')
     downloads_dir = os.path.join(user_home, 'Downloads')
@@ -1991,6 +2032,10 @@ class MainWindow(QMainWindow):
             return
         self.output_dir = output_dir
         self.output_path_input.setText(output_dir)
+        try:
+            save_output_dir(output_dir)
+        except Exception:
+            pass
 
     def choose_output_dir(self):
         selected_dir = QFileDialog.getExistingDirectory(
