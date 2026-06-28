@@ -135,6 +135,19 @@ def detect_site(url):
     return 'other'
 
 
+def is_youtube_playlist_url(url):
+    try:
+        parsed_url = urllib.parse.urlparse((url or '').strip())
+        query = urllib.parse.parse_qs(parsed_url.query or '')
+    except Exception:
+        return False
+
+    host = extract_url_hostname(url)
+    if not host_matches(host, 'youtube.com') and not host_matches(host, 'youtu.be'):
+        return False
+    return bool(query.get('list')) or (parsed_url.path or '').lower() == '/playlist'
+
+
 def get_cookie_args(cookie_mode, cookie_file):
     if cookie_mode == 'file' and os.path.exists(cookie_file):
         return ['--cookies', cookie_file]
@@ -713,6 +726,19 @@ class SniffThread(QThread):
         cmd.append(self.url)
         return cmd
 
+    def build_playlist_sniff_cmd(self, cookie_mode):
+        cmd = [
+            self.parent().get_ytdlp_command(),
+            '--dump-single-json',
+            '--flat-playlist',
+            '--ignore-errors',
+            '--no-warnings',
+            '--yes-playlist',
+        ]
+        cmd.extend(get_cookie_args(cookie_mode, self.parent().cookie_file))
+        cmd.append(self.url)
+        return cmd
+
     def build_cookie_modes(self, site):
         browser_cookie_modes = ['browser:firefox', 'browser:edge', 'browser:chrome']
         has_manual_cookie = self.parent().has_manual_cookie_for_url(self.url)
@@ -861,6 +887,34 @@ class SniffThread(QThread):
 
         self.add_subtitle_group(info.get('subtitles'), 'manual')
         self.add_subtitle_group(info.get('automatic_captions'), 'auto')
+
+    def populate_youtube_playlist_from_info(self, info):
+        entries = [
+            entry for entry in (info.get('entries') or [])
+            if isinstance(entry, dict) and (entry.get('id') or entry.get('url'))
+        ]
+        playlist_count = len(entries) or info.get('playlist_count') or info.get('n_entries') or 0
+        playlist_title = (
+            info.get('playlist_title')
+            or info.get('title')
+            or 'YouTube 视频列表'
+        )
+        if not playlist_count:
+            return False
+
+        format_id = 'youtube-playlist:best'
+        count_label = f'{playlist_count}个视频' if playlist_count else '多个视频'
+        self.available_formats = [(format_id, f'列表批量下载/最佳视频+音频/{count_label}')]
+        self.subtitle_entries = []
+        self.format_metadata = {
+            format_id: {
+                'kind': 'playlist',
+                'site': 'youtube',
+                'playlist_title': playlist_title,
+                'playlist_count': playlist_count,
+            }
+        }
+        return True
 
     def apply_requests_cookies(self, session, cookie_mode):
         if session is None:
@@ -1252,8 +1306,9 @@ class SniffThread(QThread):
         self.direct_download_payloads = {}
         self.format_metadata = {}
         site = detect_site(self.url)
+        is_playlist = site == 'youtube' and is_youtube_playlist_url(self.url)
         process = subprocess.Popen(
-            self.build_sniff_cmd(cookie_mode),
+            self.build_playlist_sniff_cmd(cookie_mode) if is_playlist else self.build_sniff_cmd(cookie_mode),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -1274,7 +1329,11 @@ class SniffThread(QThread):
             if not info:
                 return False, '嗅探返回了无法解析的 JSON', []
 
-            self.populate_formats_from_info(info)
+            if is_playlist:
+                if not self.populate_youtube_playlist_from_info(info):
+                    return False, '未找到 YouTube 列表中的可下载视频', []
+            else:
+                self.populate_formats_from_info(info)
             if not self.available_formats and not self.subtitle_entries:
                 return False, '未找到可用的视频格式或字幕', []
 
@@ -1543,10 +1602,24 @@ class DownloadThread(QThread):
     def run_ytdlp_download(self):
         format_metadata = self.parent().get_format_metadata(self.format_id)
         is_subtitle = self.format_id.startswith('subtitle:')
+        is_playlist = format_metadata.get('kind') == 'playlist'
         is_audio_only = format_metadata.get('kind') == 'audio'
         is_progressive_video = format_metadata.get('kind') == 'video' and format_metadata.get('has_audio')
         os.makedirs(self.parent().get_output_dir(), exist_ok=True)
-        if is_subtitle:
+        if is_playlist:
+            playlist_title = sanitize_filename(format_metadata.get('playlist_title') or 'YouTube 视频列表')
+            cmd = [
+                self.parent().get_ytdlp_command(),
+                '--yes-playlist',
+                '--ignore-errors',
+                '-f',
+                'bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b',
+                '--merge-output-format',
+                'mp4',
+                '-o',
+                f'{playlist_title}/%(playlist_index)03d - %(title)s.%(ext)s',
+            ]
+        elif is_subtitle:
             _, subtitle_lang, subtitle_mode = self.format_id.split(':', 2)
             cmd = [self.parent().get_ytdlp_command()]
             if subtitle_mode == 'auto':
@@ -1562,7 +1635,9 @@ class DownloadThread(QThread):
         cmd.extend(get_cookie_args(self.parent().cookie_mode, self.parent().cookie_file))
         cmd.extend(['-P', self.parent().get_output_dir()])
 
-        if is_subtitle:
+        if is_playlist:
+            cmd.extend([self.url, '--newline'])
+        elif is_subtitle:
             cmd.extend([self.url, '--newline'])
         elif is_audio_only or is_progressive_video:
             cmd.extend([self.url, '--newline'])
@@ -1603,6 +1678,10 @@ class DownloadThread(QThread):
 
             process.wait()
             if process.returncode == 0:
+                if is_playlist:
+                    self.finished_signal.emit(True, f'列表下载完成：{os.path.join(self.parent().get_output_dir(), playlist_title)}')
+                    return
+
                 final_path = self.finalize_downloaded_file(downloaded_file) or downloaded_file
                 if final_path:
                     message = '字幕下载完成' if is_subtitle else '下载完成'
@@ -1611,7 +1690,10 @@ class DownloadThread(QThread):
                     self.finished_signal.emit(True, '字幕下载完成' if is_subtitle else '下载完成')
             else:
                 self.cleanup_ytdlp_partial_files(downloaded_file)
-                default_message = '字幕下载失败' if is_subtitle else '下载失败'
+                if is_playlist:
+                    default_message = '列表下载失败'
+                else:
+                    default_message = '字幕下载失败' if is_subtitle else '下载失败'
                 self.finished_signal.emit(False, extract_process_error_message(recent_lines, default_message))
         finally:
             if process.poll() is None:
