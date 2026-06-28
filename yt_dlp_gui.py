@@ -187,15 +187,6 @@ def terminate_process_tree(process, timeout=3):
     if not process or process.poll() is not None:
         return True
 
-    try:
-        process.terminate()
-        process.wait(timeout=timeout)
-        return True
-    except subprocess.TimeoutExpired:
-        pass
-    except Exception:
-        pass
-
     if os.name == 'nt' and getattr(process, 'pid', None):
         try:
             subprocess.run(
@@ -209,6 +200,15 @@ def terminate_process_tree(process, timeout=3):
             return process.poll() is not None
         except Exception:
             pass
+
+    try:
+        process.terminate()
+        process.wait(timeout=timeout)
+        return True
+    except subprocess.TimeoutExpired:
+        pass
+    except Exception:
+        pass
 
     try:
         process.kill()
@@ -1355,6 +1355,7 @@ class DownloadThread(QThread):
         self.format_id = format_id
         self.is_running = True
         self.process = None
+        self.current_response = None
 
     def finalize_downloaded_file(self, downloaded_file):
         if not downloaded_file or not os.path.exists(downloaded_file):
@@ -1404,32 +1405,41 @@ class DownloadThread(QThread):
 
     def download_url_to_file(self, url, target_path, headers):
         request = urllib.request.Request(url, headers=headers or {})
-        with urllib.request.urlopen(request, timeout=30) as response, open(target_path, 'wb') as output_file:
-            total = response.headers.get('Content-Length')
-            total_bytes = int(total) if total and total.isdigit() else 0
-            downloaded = 0
-            last_reported_mb = -1
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response, open(target_path, 'wb') as output_file:
+                self.current_response = response
+                total = response.headers.get('Content-Length')
+                total_bytes = int(total) if total and total.isdigit() else 0
+                downloaded = 0
+                last_reported_mb = -1
 
-            while self.is_running:
-                chunk = response.read(1024 * 256)
-                if not chunk:
-                    break
-                output_file.write(chunk)
-                downloaded += len(chunk)
+                while self.is_running:
+                    try:
+                        chunk = response.read(1024 * 256)
+                    except Exception:
+                        if not self.is_running:
+                            raise RuntimeError('下载已取消')
+                        raise
+                    if not chunk:
+                        break
+                    output_file.write(chunk)
+                    downloaded += len(chunk)
 
-                current_mb = downloaded // (1024 * 1024)
-                if current_mb != last_reported_mb:
-                    last_reported_mb = current_mb
-                    if total_bytes:
-                        percent = int(downloaded * 100 / total_bytes)
-                        self.progress_signal.emit(f'正在下载直连流... {percent}%')
-                    else:
-                        self.progress_signal.emit(f'正在下载直连流... {round(downloaded / (1024 * 1024), 1)}MB')
+                    current_mb = downloaded // (1024 * 1024)
+                    if current_mb != last_reported_mb:
+                        last_reported_mb = current_mb
+                        if total_bytes:
+                            percent = int(downloaded * 100 / total_bytes)
+                            self.progress_signal.emit(f'正在下载直连流... {percent}%')
+                        else:
+                            self.progress_signal.emit(f'正在下载直连流... {round(downloaded / (1024 * 1024), 1)}MB')
 
-            if not self.is_running:
-                raise RuntimeError('下载已取消')
-            if total_bytes and downloaded != total_bytes:
-                raise RuntimeError('直连下载不完整，请重试')
+                if not self.is_running:
+                    raise RuntimeError('下载已取消')
+                if total_bytes and downloaded != total_bytes:
+                    raise RuntimeError('直连下载不完整，请重试')
+        finally:
+            self.current_response = None
 
     def run_merge_process(self, cmd):
         process = subprocess.Popen(
@@ -1616,10 +1626,18 @@ class DownloadThread(QThread):
             else:
                 self.run_ytdlp_download()
         except Exception as e:
-            self.finished_signal.emit(False, f'发生错误：{str(e)}')
+            if '已取消' in str(e):
+                self.finished_signal.emit(False, '下载已取消')
+            else:
+                self.finished_signal.emit(False, f'发生错误：{str(e)}')
 
     def stop(self):
         self.is_running = False
+        if self.current_response is not None:
+            try:
+                self.current_response.close()
+            except Exception:
+                pass
         terminate_process_tree(self.process)
 
 class UpdateYtDlpThread(QThread):
