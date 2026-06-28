@@ -943,14 +943,26 @@ class SniffThread(QThread):
         if not playlist_count:
             return False
 
-        format_id = 'youtube-playlist:best'
         count_label = f'{playlist_count}个视频' if playlist_count else '多个视频'
-        self.available_formats = [(format_id, f'列表批量下载/H.264视频+音频/{count_label}')]
+        h264_format_id = 'youtube-playlist:h264'
+        compatible_format_id = 'youtube-playlist:compatible'
+        self.available_formats = [
+            (h264_format_id, f'列表批量下载/H.264优先/{count_label}'),
+            (compatible_format_id, f'列表批量下载/最佳兼容/{count_label}'),
+        ]
         self.subtitle_entries = []
         self.format_metadata = {
-            format_id: {
+            h264_format_id: {
                 'kind': 'playlist',
                 'site': 'youtube',
+                'mode': 'h264',
+                'playlist_title': playlist_title,
+                'playlist_count': playlist_count,
+            },
+            compatible_format_id: {
+                'kind': 'playlist',
+                'site': 'youtube',
+                'mode': 'compatible',
                 'playlist_title': playlist_title,
                 'playlist_count': playlist_count,
             }
@@ -1649,12 +1661,19 @@ class DownloadThread(QThread):
         os.makedirs(self.parent().get_output_dir(), exist_ok=True)
         if is_playlist:
             playlist_title = sanitize_filename(format_metadata.get('playlist_title') or 'YouTube 视频列表')
+            playlist_mode = format_metadata.get('mode') or 'h264'
+            playlist_mode_label = 'H.264优先' if playlist_mode == 'h264' else '最佳兼容'
+            playlist_format = (
+                'bv*[ext=mp4][vcodec^=avc]+ba[ext=m4a]/b[ext=mp4][vcodec^=avc]'
+                if playlist_mode == 'h264'
+                else 'bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b'
+            )
             cmd = [
                 self.parent().get_ytdlp_command(),
                 '--yes-playlist',
                 '--ignore-errors',
                 '-f',
-                'bv*[ext=mp4][vcodec^=avc]+ba[ext=m4a]/b[ext=mp4][vcodec^=avc]',
+                playlist_format,
                 '--merge-output-format',
                 'mp4',
                 '-o',
@@ -1720,7 +1739,7 @@ class DownloadThread(QThread):
             process.wait()
             if process.returncode == 0:
                 if is_playlist:
-                    self.finished_signal.emit(True, f'列表下载完成：{os.path.join(self.parent().get_output_dir(), playlist_title)}')
+                    self.finished_signal.emit(True, f'列表下载完成（{playlist_mode_label}）：{os.path.join(self.parent().get_output_dir(), playlist_title)}')
                     return
 
                 final_path = self.finalize_downloaded_file(downloaded_file) or downloaded_file
@@ -1732,7 +1751,7 @@ class DownloadThread(QThread):
             else:
                 self.cleanup_ytdlp_partial_files(downloaded_file)
                 if is_playlist:
-                    default_message = '列表下载失败'
+                    default_message = f'列表下载失败（{playlist_mode_label}）'
                 else:
                     default_message = '字幕下载失败' if is_subtitle else '下载失败'
                 self.finished_signal.emit(False, extract_process_error_message(recent_lines, default_message))
@@ -2216,8 +2235,12 @@ class MainWindow(QMainWindow):
             and not (format_metadata.get('kind') == 'video' and format_metadata.get('has_audio'))
         )
         if needs_ffmpeg and not self.has_ffmpeg():
-            QMessageBox.warning(self, '错误', '未找到 FFmpeg。请把 ffmpeg.exe 放到程序根目录，或安装 FFmpeg 并加入 PATH。')
-            self.progress_text.setText('缺少 FFmpeg，无法合并视频和音频')
+            if format_metadata.get('kind') == 'playlist':
+                QMessageBox.warning(self, '错误', '列表下载需要 FFmpeg 合并音视频。请把 ffmpeg.exe 放到程序根目录，或安装 FFmpeg 并加入 PATH。')
+                self.progress_text.setText('缺少 FFmpeg，无法下载 YouTube 列表')
+            else:
+                QMessageBox.warning(self, '错误', '未找到 FFmpeg。请把 ffmpeg.exe 放到程序根目录，或安装 FFmpeg 并加入 PATH。')
+                self.progress_text.setText('缺少 FFmpeg，无法合并视频和音频')
             return
         
         # 停止当前下载线程（如果有）
