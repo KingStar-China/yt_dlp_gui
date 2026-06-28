@@ -904,7 +904,7 @@ class SniffThread(QThread):
 
         format_id = 'youtube-playlist:best'
         count_label = f'{playlist_count}个视频' if playlist_count else '多个视频'
-        self.available_formats = [(format_id, f'列表批量下载/最佳视频+音频/{count_label}')]
+        self.available_formats = [(format_id, f'列表批量下载/H.264视频+音频/{count_label}')]
         self.subtitle_entries = []
         self.format_metadata = {
             format_id: {
@@ -1613,7 +1613,7 @@ class DownloadThread(QThread):
                 '--yes-playlist',
                 '--ignore-errors',
                 '-f',
-                'bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b',
+                'bv*[ext=mp4][vcodec^=avc]+ba[ext=m4a]/b[ext=mp4][vcodec^=avc]',
                 '--merge-output-format',
                 'mp4',
                 '-o',
