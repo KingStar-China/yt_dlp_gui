@@ -183,6 +183,41 @@ def ensure_unique_path(file_path):
         index += 1
 
 
+def terminate_process_tree(process, timeout=3):
+    if not process or process.poll() is not None:
+        return True
+
+    try:
+        process.terminate()
+        process.wait(timeout=timeout)
+        return True
+    except subprocess.TimeoutExpired:
+        pass
+    except Exception:
+        pass
+
+    if os.name == 'nt' and getattr(process, 'pid', None):
+        try:
+            subprocess.run(
+                ['taskkill', '/F', '/T', '/PID', str(process.pid)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+                timeout=timeout,
+            )
+            process.wait(timeout=timeout)
+            return process.poll() is not None
+        except Exception:
+            pass
+
+    try:
+        process.kill()
+        process.wait(timeout=timeout)
+    except Exception:
+        pass
+    return process.poll() is not None
+
+
 def extract_process_error_message(lines, default_message):
     for raw_line in reversed(list(lines or [])):
         line = str(raw_line or '').strip()
@@ -1186,7 +1221,7 @@ class SniffThread(QThread):
         if not self.is_running:
             return False, '嗅探已取消'
         if not is_accessible:
-            return False, accessibility_message
+            self.progress_signal.emit(f'{accessibility_message}，继续尝试 yt-dlp 嗅探...')
 
         if site in {'youtube', 'bilibili'}:
             return True, ''
@@ -1225,12 +1260,13 @@ class SniffThread(QThread):
             creationflags=subprocess.CREATE_NO_WINDOW,
         )
         self.process = process
-        output, error_output = process.communicate()
-        self.process = None
+        try:
+            output, error_output = process.communicate()
+        finally:
+            self.process = None
 
         if not self.is_running:
-            if process.poll() is None:
-                process.terminate()
+            terminate_process_tree(process)
             return False, '嗅探已取消', []
 
         if process.returncode == 0:
@@ -1307,8 +1343,7 @@ class SniffThread(QThread):
 
     def stop(self):
         self.is_running = False
-        if self.process and self.process.poll() is None:
-            self.process.terminate()
+        terminate_process_tree(self.process)
 
 class DownloadThread(QThread):
     progress_signal = pyqtSignal(str)
@@ -1323,7 +1358,7 @@ class DownloadThread(QThread):
 
     def finalize_downloaded_file(self, downloaded_file):
         if not downloaded_file or not os.path.exists(downloaded_file):
-            return
+            return None
 
         file_size = os.path.getsize(downloaded_file)
         file_size_str = ''
@@ -1348,13 +1383,24 @@ class DownloadThread(QThread):
             new_name = downloaded_file
 
         if new_name == downloaded_file:
-            return
+            return downloaded_file
 
         target_path = ensure_unique_path(new_name)
         try:
             os.replace(downloaded_file, target_path)
+            return target_path
         except OSError as exc:
             raise RuntimeError(f'下载完成但重命名失败：{str(exc)}')
+
+    def cleanup_ytdlp_partial_files(self, downloaded_file):
+        if not downloaded_file:
+            return
+        for partial_path in (f'{downloaded_file}.part', f'{downloaded_file}.ytdl'):
+            try:
+                if os.path.exists(partial_path):
+                    os.remove(partial_path)
+            except Exception:
+                pass
 
     def download_url_to_file(self, url, target_path, headers):
         request = urllib.request.Request(url, headers=headers or {})
@@ -1406,18 +1452,15 @@ class DownloadThread(QThread):
                     self.progress_signal.emit(line)
 
             if not self.is_running and process.poll() is None:
-                process.terminate()
-                try:
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=5)
+                terminate_process_tree(process, timeout=5)
                 raise RuntimeError('下载已取消')
 
             process.wait()
             if process.returncode != 0:
                 raise RuntimeError(extract_process_error_message(output_lines, 'FFmpeg 合并失败'))
         finally:
+            if process.poll() is None:
+                terminate_process_tree(process, timeout=2)
             self.process = None
 
     def run_direct_download(self, direct_payload):
@@ -1440,9 +1483,9 @@ class DownloadThread(QThread):
                     direct_payload.get('headers'),
                 )
                 os.replace(temp_path, final_path)
-                self.finalize_downloaded_file(final_path)
+                final_path = self.finalize_downloaded_file(final_path) or final_path
                 success = True
-                self.finished_signal.emit(True, '下载完成')
+                self.finished_signal.emit(True, f'下载完成：{final_path}')
                 return
 
             final_path = ensure_unique_path(os.path.join(output_dir, f'{title}.mp4'))
@@ -1471,9 +1514,9 @@ class DownloadThread(QThread):
             self.progress_signal.emit('正在用 FFmpeg 合并 B站音视频...')
             self.run_merge_process(ffmpeg_cmd)
 
-            self.finalize_downloaded_file(final_path)
+            final_path = self.finalize_downloaded_file(final_path) or final_path
             success = True
-            self.finished_signal.emit(True, '下载完成')
+            self.finished_signal.emit(True, f'下载完成：{final_path}')
         finally:
             if not success and final_path and os.path.exists(final_path):
                 try:
@@ -1527,28 +1570,43 @@ class DownloadThread(QThread):
         downloaded_file = None
         recent_lines = deque(maxlen=40)
 
-        while self.is_running:
-            line = process.stdout.readline()
-            if not line:
-                break
-            line = line.strip()
-            recent_lines.append(line)
-            self.progress_signal.emit(line)
-            if '[download] Destination:' in line:
-                downloaded_file = line.split(':', 1)[1].strip()
-            elif '[Merger] Merging formats into ' in line:
-                downloaded_file = line.split('into ', 1)[1].strip().strip('"')
+        try:
+            while self.is_running:
+                line = process.stdout.readline()
+                if not line:
+                    break
+                line = line.strip()
+                recent_lines.append(line)
+                self.progress_signal.emit(line)
+                if '[download] Destination:' in line:
+                    downloaded_file = line.split(':', 1)[1].strip()
+                elif '[Merger] Merging formats into ' in line:
+                    downloaded_file = line.split('into ', 1)[1].strip().strip('"')
+                elif '[ExtractAudio] Destination:' in line:
+                    downloaded_file = line.split(':', 1)[1].strip()
 
-        process.wait()
-        if not self.is_running:
-            self.finished_signal.emit(False, '下载已取消')
-            return
-        if process.returncode == 0:
-            self.finalize_downloaded_file(downloaded_file)
-            self.finished_signal.emit(True, '下载完成' if not is_subtitle else '字幕下载完成')
-        else:
-            default_message = '字幕下载失败' if is_subtitle else '下载失败'
-            self.finished_signal.emit(False, extract_process_error_message(recent_lines, default_message))
+            if not self.is_running:
+                terminate_process_tree(process, timeout=5)
+                self.cleanup_ytdlp_partial_files(downloaded_file)
+                self.finished_signal.emit(False, '下载已取消')
+                return
+
+            process.wait()
+            if process.returncode == 0:
+                final_path = self.finalize_downloaded_file(downloaded_file) or downloaded_file
+                if final_path:
+                    message = '字幕下载完成' if is_subtitle else '下载完成'
+                    self.finished_signal.emit(True, f'{message}：{final_path}')
+                else:
+                    self.finished_signal.emit(True, '字幕下载完成' if is_subtitle else '下载完成')
+            else:
+                self.cleanup_ytdlp_partial_files(downloaded_file)
+                default_message = '字幕下载失败' if is_subtitle else '下载失败'
+                self.finished_signal.emit(False, extract_process_error_message(recent_lines, default_message))
+        finally:
+            if process.poll() is None:
+                terminate_process_tree(process, timeout=2)
+            self.process = None
 
     def run(self):
         try:
@@ -1562,8 +1620,7 @@ class DownloadThread(QThread):
 
     def stop(self):
         self.is_running = False
-        if self.process and self.process.poll() is None:
-            self.process.terminate()
+        terminate_process_tree(self.process)
 
 class UpdateYtDlpThread(QThread):
     finished_signal = pyqtSignal(bool, str)
@@ -1866,11 +1923,17 @@ class MainWindow(QMainWindow):
     def get_format_metadata(self, format_id):
         return self.format_metadata_map.get(format_id, {})
 
-    def reset_url_dependent_state(self, set_ready_text=True):
+    def clear_format_state(self):
         self.format_combo.clear()
         self.format_label_map.clear()
         self.format_metadata_map.clear()
         self.set_direct_download_payloads({})
+
+    def is_cancel_message(self, message):
+        return '已取消' in str(message or '')
+
+    def reset_url_dependent_state(self, set_ready_text=True):
+        self.clear_format_state()
         self.cookie_mode = 'none'
         self.cookie_container.hide()
         self.download_button.setText('开始嗅探')
@@ -1973,11 +2036,7 @@ class MainWindow(QMainWindow):
             if not self.stop_worker_thread(self.sniff_thread, 2000):
                 QMessageBox.warning(self, '提示', '上一次嗅探仍在结束，请稍后再试。')
                 return
-            # 清空格式选择框
-            self.format_combo.clear()
-            self.format_label_map.clear()
-            self.format_metadata_map.clear()
-            self.set_direct_download_payloads({})
+            self.clear_format_state()
             
             # 更改按钮文本和状态
             self.download_button.setText('正在嗅探中')
@@ -2079,16 +2138,15 @@ class MainWindow(QMainWindow):
         else:
             # 嗅探失败时重置状态
             self.download_button.setText('开始嗅探')
-            self.progress_text.setText('准备就绪')
-            self.format_combo.clear()
-            self.format_label_map.clear()
-            self.format_metadata_map.clear()
-            self.set_direct_download_payloads({})
+            self.progress_text.setText(message if self.is_cancel_message(message) else '准备就绪')
+            self.clear_format_state()
             
             if cookie_mode == 'show_cookie_input':
                 self.cookie_container.show()
                 self.cookie_mode = 'none'
                 QMessageBox.warning(self, '错误', message)
+            elif self.is_cancel_message(message):
+                return
             elif not success:
                 retry_box = QMessageBox(self)
                 retry_box.setWindowTitle('错误')
@@ -2114,7 +2172,9 @@ class MainWindow(QMainWindow):
         self.progress_text.setText(message)
         self.download_button.setText('开始下载')  # 无论成功失败都显示"开始下载"
         if success:
-            QMessageBox.information(self, '成功', '下载完成！')
+            QMessageBox.information(self, '成功', message)
+        elif self.is_cancel_message(message):
+            return
         else:
             retry_box = QMessageBox(self)
             retry_box.setWindowTitle('错误')
