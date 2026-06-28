@@ -147,6 +147,17 @@ VIDEO_CODEC_PRIORITY = [
     ('H.266', ('vvc1', 'vvi1', 'vvc', 'h266')),
 ]
 
+PLAYLIST_MODE_DEFINITIONS = {
+    'h264': {
+        'label': 'H.264优先',
+        'format': 'bv*[ext=mp4][vcodec^=avc]+ba[ext=m4a]/b[ext=mp4][vcodec^=avc]',
+    },
+    'compatible': {
+        'label': '最佳兼容',
+        'format': 'bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b',
+    },
+}
+
 
 def extract_url_hostname(url):
     try:
@@ -197,6 +208,78 @@ def get_cookie_args(cookie_mode, cookie_file):
     if cookie_mode.startswith('browser:'):
         return ['--cookies-from-browser', cookie_mode.split(':', 1)[1]]
     return []
+
+
+def get_playlist_mode(mode):
+    return PLAYLIST_MODE_DEFINITIONS.get(mode) or PLAYLIST_MODE_DEFINITIONS['h264']
+
+
+def get_format_kind(format_id, format_metadata):
+    if str(format_id or '').startswith('subtitle:'):
+        return 'subtitle'
+    return (format_metadata or {}).get('kind') or 'video'
+
+
+def format_needs_ffmpeg(format_id, format_metadata, direct_payload=None):
+    kind = get_format_kind(format_id, format_metadata)
+    if kind in {'subtitle', 'audio'}:
+        return False
+    if direct_payload and direct_payload.get('type') == 'bilibili_direct_audio':
+        return False
+    if kind == 'video' and (format_metadata or {}).get('has_audio'):
+        return False
+    return True
+
+
+def build_sniff_command(ytdlp_command, url, cookie_mode, cookie_file, is_playlist=False):
+    cmd = [
+        ytdlp_command,
+        '--dump-single-json',
+        '--no-warnings',
+    ]
+    if is_playlist:
+        cmd.extend(['--flat-playlist', '--ignore-errors', '--yes-playlist'])
+    else:
+        cmd.append('--no-playlist')
+    cmd.extend(get_cookie_args(cookie_mode, cookie_file))
+    cmd.append(url)
+    return cmd
+
+
+def build_ytdlp_download_command(ytdlp_command, url, format_id, format_metadata, output_dir, cookie_mode, cookie_file):
+    kind = get_format_kind(format_id, format_metadata)
+    cmd = [ytdlp_command]
+
+    if kind == 'playlist':
+        playlist_title = sanitize_filename((format_metadata or {}).get('playlist_title') or 'YouTube 视频列表')
+        playlist_mode = (format_metadata or {}).get('mode') or 'h264'
+        playlist_mode_info = get_playlist_mode(playlist_mode)
+        cmd.extend([
+            '--yes-playlist',
+            '--ignore-errors',
+            '-f',
+            playlist_mode_info['format'],
+            '--merge-output-format',
+            'mp4',
+            '-o',
+            f'{playlist_title}/%(playlist_index)03d - %(title)s.%(ext)s',
+        ])
+    elif kind == 'subtitle':
+        _, subtitle_lang, subtitle_mode = str(format_id).split(':', 2)
+        cmd.append('--write-auto-sub' if subtitle_mode == 'auto' else '--write-sub')
+        cmd.extend(['--sub-lang', subtitle_lang, '--convert-subs', 'srt', '--skip-download'])
+    elif kind == 'audio' or ((format_metadata or {}).get('kind') == 'video' and (format_metadata or {}).get('has_audio')):
+        cmd.extend(['-f', format_id])
+    else:
+        cmd.extend(['-f', f'{format_id}+bestaudio[ext=m4a]'])
+
+    cmd.extend(get_cookie_args(cookie_mode, cookie_file))
+    cmd.extend(['-P', output_dir])
+
+    if kind == 'video' and not (format_metadata or {}).get('has_audio'):
+        cmd.extend(['--merge-output-format', 'mp4'])
+    cmd.extend([url, '--newline'])
+    return cmd
 
 
 def format_size_from_bytes(filesize):
@@ -757,28 +840,22 @@ class SniffThread(QThread):
         self.format_metadata = {}
 
     def build_sniff_cmd(self, cookie_mode):
-        cmd = [
+        return build_sniff_command(
             self.parent().get_ytdlp_command(),
-            '--dump-single-json',
-            '--no-warnings',
-            '--no-playlist',
-        ]
-        cmd.extend(get_cookie_args(cookie_mode, self.parent().cookie_file))
-        cmd.append(self.url)
-        return cmd
+            self.url,
+            cookie_mode,
+            self.parent().cookie_file,
+            is_playlist=False,
+        )
 
     def build_playlist_sniff_cmd(self, cookie_mode):
-        cmd = [
+        return build_sniff_command(
             self.parent().get_ytdlp_command(),
-            '--dump-single-json',
-            '--flat-playlist',
-            '--ignore-errors',
-            '--no-warnings',
-            '--yes-playlist',
-        ]
-        cmd.extend(get_cookie_args(cookie_mode, self.parent().cookie_file))
-        cmd.append(self.url)
-        return cmd
+            self.url,
+            cookie_mode,
+            self.parent().cookie_file,
+            is_playlist=True,
+        )
 
     def build_cookie_modes(self, site):
         browser_cookie_modes = ['browser:firefox', 'browser:edge', 'browser:chrome']
@@ -944,28 +1021,21 @@ class SniffThread(QThread):
             return False
 
         count_label = f'{playlist_count}个视频' if playlist_count else '多个视频'
-        h264_format_id = 'youtube-playlist:h264'
-        compatible_format_id = 'youtube-playlist:compatible'
+        playlist_mode_ids = [f'youtube-playlist:{mode}' for mode in PLAYLIST_MODE_DEFINITIONS]
         self.available_formats = [
-            (h264_format_id, f'列表批量下载/H.264优先/{count_label}'),
-            (compatible_format_id, f'列表批量下载/最佳兼容/{count_label}'),
+            (format_id, f'列表批量下载/{get_playlist_mode(format_id.split(":", 1)[1])["label"]}/{count_label}')
+            for format_id in playlist_mode_ids
         ]
         self.subtitle_entries = []
         self.format_metadata = {
-            h264_format_id: {
+            format_id: {
                 'kind': 'playlist',
                 'site': 'youtube',
-                'mode': 'h264',
-                'playlist_title': playlist_title,
-                'playlist_count': playlist_count,
-            },
-            compatible_format_id: {
-                'kind': 'playlist',
-                'site': 'youtube',
-                'mode': 'compatible',
+                'mode': format_id.split(':', 1)[1],
                 'playlist_title': playlist_title,
                 'playlist_count': playlist_count,
             }
+            for format_id in playlist_mode_ids
         }
         return True
 
@@ -1654,55 +1724,25 @@ class DownloadThread(QThread):
 
     def run_ytdlp_download(self):
         format_metadata = self.parent().get_format_metadata(self.format_id)
-        is_subtitle = self.format_id.startswith('subtitle:')
-        is_playlist = format_metadata.get('kind') == 'playlist'
-        is_audio_only = format_metadata.get('kind') == 'audio'
-        is_progressive_video = format_metadata.get('kind') == 'video' and format_metadata.get('has_audio')
-        os.makedirs(self.parent().get_output_dir(), exist_ok=True)
+        format_kind = get_format_kind(self.format_id, format_metadata)
+        is_subtitle = format_kind == 'subtitle'
+        is_playlist = format_kind == 'playlist'
+        output_dir = self.parent().get_output_dir()
+        os.makedirs(output_dir, exist_ok=True)
         if is_playlist:
             playlist_title = sanitize_filename(format_metadata.get('playlist_title') or 'YouTube 视频列表')
             playlist_mode = format_metadata.get('mode') or 'h264'
-            playlist_mode_label = 'H.264优先' if playlist_mode == 'h264' else '最佳兼容'
-            playlist_format = (
-                'bv*[ext=mp4][vcodec^=avc]+ba[ext=m4a]/b[ext=mp4][vcodec^=avc]'
-                if playlist_mode == 'h264'
-                else 'bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b'
-            )
-            cmd = [
-                self.parent().get_ytdlp_command(),
-                '--yes-playlist',
-                '--ignore-errors',
-                '-f',
-                playlist_format,
-                '--merge-output-format',
-                'mp4',
-                '-o',
-                f'{playlist_title}/%(playlist_index)03d - %(title)s.%(ext)s',
-            ]
-        elif is_subtitle:
-            _, subtitle_lang, subtitle_mode = self.format_id.split(':', 2)
-            cmd = [self.parent().get_ytdlp_command()]
-            if subtitle_mode == 'auto':
-                cmd.append('--write-auto-sub')
-            else:
-                cmd.append('--write-sub')
-            cmd.extend(['--sub-lang', subtitle_lang, '--convert-subs', 'srt', '--skip-download'])
-        elif is_audio_only or is_progressive_video:
-            cmd = [self.parent().get_ytdlp_command(), '-f', self.format_id]
-        else:
-            cmd = [self.parent().get_ytdlp_command(), '-f', f'{self.format_id}+bestaudio[ext=m4a]']
+            playlist_mode_label = get_playlist_mode(playlist_mode)['label']
 
-        cmd.extend(get_cookie_args(self.parent().cookie_mode, self.parent().cookie_file))
-        cmd.extend(['-P', self.parent().get_output_dir()])
-
-        if is_playlist:
-            cmd.extend([self.url, '--newline'])
-        elif is_subtitle:
-            cmd.extend([self.url, '--newline'])
-        elif is_audio_only or is_progressive_video:
-            cmd.extend([self.url, '--newline'])
-        else:
-            cmd.extend(['--merge-output-format', 'mp4', self.url, '--newline'])
+        cmd = build_ytdlp_download_command(
+            self.parent().get_ytdlp_command(),
+            self.url,
+            self.format_id,
+            format_metadata,
+            output_dir,
+            self.parent().cookie_mode,
+            self.parent().cookie_file,
+        )
 
         process = subprocess.Popen(
             cmd,
@@ -1739,7 +1779,7 @@ class DownloadThread(QThread):
             process.wait()
             if process.returncode == 0:
                 if is_playlist:
-                    self.finished_signal.emit(True, f'列表下载完成（{playlist_mode_label}）：{os.path.join(self.parent().get_output_dir(), playlist_title)}')
+                    self.finished_signal.emit(True, f'列表下载完成（{playlist_mode_label}）：{os.path.join(output_dir, playlist_title)}')
                     return
 
                 final_path = self.finalize_downloaded_file(downloaded_file) or downloaded_file
@@ -2087,6 +2127,23 @@ class MainWindow(QMainWindow):
     def get_format_metadata(self, format_id):
         return self.format_metadata_map.get(format_id, {})
 
+    def get_current_format_id(self):
+        current_index = self.format_combo.currentIndex()
+        return self.format_combo.itemData(current_index)
+
+    def apply_format_results(self, formats, direct_download_payloads, format_metadata):
+        self.clear_format_state()
+        self.set_direct_download_payloads(direct_download_payloads)
+        self.format_metadata_map.update(format_metadata or {})
+
+        for format_id, format_label in formats:
+            self.format_combo.addItem(format_label, format_id)
+            self.format_label_map[format_id] = format_label
+
+        if self.format_combo.count() > 0:
+            self.format_combo.setCurrentIndex(0)
+            self.download_button.setText('开始下载')
+
     def clear_format_state(self):
         self.format_combo.clear()
         self.format_label_map.clear()
@@ -2220,21 +2277,14 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, '警告', '请选择视频格式')
             return
 
-        current_index = self.format_combo.currentIndex()
-        format_id = self.format_combo.itemData(current_index)
+        format_id = self.get_current_format_id()
         if not format_id:
             QMessageBox.warning(self, '警告', '当前格式无效，请重新嗅探')
             return
 
         direct_payload = self.get_direct_download_payload(format_id)
         format_metadata = self.get_format_metadata(format_id)
-        needs_ffmpeg = (
-            not format_id.startswith('subtitle:')
-            and not (direct_payload and direct_payload.get('type') == 'bilibili_direct_audio')
-            and format_metadata.get('kind') != 'audio'
-            and not (format_metadata.get('kind') == 'video' and format_metadata.get('has_audio'))
-        )
-        if needs_ffmpeg and not self.has_ffmpeg():
+        if format_needs_ffmpeg(format_id, format_metadata, direct_payload) and not self.has_ffmpeg():
             if format_metadata.get('kind') == 'playlist':
                 QMessageBox.warning(self, '错误', '列表下载需要 FFmpeg 合并音视频。请把 ffmpeg.exe 放到程序根目录，或安装 FFmpeg 并加入 PATH。')
                 self.progress_text.setText('缺少 FFmpeg，无法下载 YouTube 列表')
@@ -2283,22 +2333,11 @@ class MainWindow(QMainWindow):
             self.cookie_mode = cookie_mode
             self.cookie_container.hide()
             self.progress_text.setText('视频/字幕嗅探完成')
-            # 清空并更新格式选择框
-            self.format_combo.clear()
-            self.format_label_map.clear()
-            self.format_metadata_map.clear()
-            self.set_direct_download_payloads(direct_download_payloads)
-            self.format_metadata_map.update(getattr(sender_thread, 'format_metadata', {}))
-            
-            for format_id, format_label in formats:
-                self.format_combo.addItem(format_label, format_id)
-                self.format_label_map[format_id] = format_label
-            
-            # 自动选择第一个格式
-            if self.format_combo.count() > 0:
-                self.format_combo.setCurrentIndex(0)
-                # 更改按钮文本为开始下载
-                self.download_button.setText('开始下载')
+            self.apply_format_results(
+                formats,
+                direct_download_payloads,
+                getattr(sender_thread, 'format_metadata', {}),
+            )
 
             if cookie_warning_message:
                 self.cookie_container.show()
