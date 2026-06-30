@@ -2142,7 +2142,7 @@ class MainWindow(QMainWindow):
 
         if self.format_combo.count() > 0:
             self.format_combo.setCurrentIndex(0)
-            self.download_button.setText('开始下载')
+            self.set_transfer_state('download_ready')
 
     def clear_format_state(self):
         self.format_combo.clear()
@@ -2153,13 +2153,45 @@ class MainWindow(QMainWindow):
     def is_cancel_message(self, message):
         return '已取消' in str(message or '')
 
+    def set_transfer_state(self, state, progress_text=None):
+        states = {
+            'sniffing': ('正在嗅探中', False, True, '正在嗅探可下载的视频、音频和字幕...'),
+            'downloading': ('正在下载中', False, False, '正在下载中...'),
+            'sniff_ready': ('开始嗅探', True, False, None),
+            'download_ready': ('开始下载', True, False, None),
+        }
+        button_text, button_enabled, is_sniffing, default_progress = states[state]
+        self.download_button.setText(button_text)
+        self.download_button.setEnabled(button_enabled)
+        self.is_sniffing = is_sniffing
+        text = progress_text if progress_text is not None else default_progress
+        if text is not None:
+            self.progress_text.setText(text)
+
+    def show_retry_dialog(self, message, retry_callback):
+        retry_box = QMessageBox(self)
+        retry_box.setWindowTitle('错误')
+        retry_box.setText(message)
+        retry_box.setIcon(QMessageBox.Icon.Warning)
+        retry_button = retry_box.addButton('再试一次', QMessageBox.ButtonRole.AcceptRole)
+        retry_box.addButton('取消', QMessageBox.ButtonRole.RejectRole)
+        retry_box.exec()
+        if retry_box.clickedButton() is retry_button:
+            QTimer.singleShot(0, retry_callback)
+
+    def show_missing_ffmpeg_warning(self, format_metadata):
+        if format_metadata.get('kind') == 'playlist':
+            QMessageBox.warning(self, '错误', '列表下载需要 FFmpeg 合并音视频。请把 ffmpeg.exe 放到程序根目录，或安装 FFmpeg 并加入 PATH。')
+            self.progress_text.setText('缺少 FFmpeg，无法下载 YouTube 列表')
+        else:
+            QMessageBox.warning(self, '错误', '未找到 FFmpeg。请把 ffmpeg.exe 放到程序根目录，或安装 FFmpeg 并加入 PATH。')
+            self.progress_text.setText('缺少 FFmpeg，无法合并视频和音频')
+
     def reset_url_dependent_state(self, set_ready_text=True):
         self.clear_format_state()
         self.cookie_mode = 'none'
         self.cookie_container.hide()
-        self.download_button.setText('开始嗅探')
-        if set_ready_text:
-            self.progress_text.setText('准备就绪')
+        self.set_transfer_state('sniff_ready', '准备就绪' if set_ready_text else None)
 
     def has_manual_cookie(self):
         has_file = bool(self.cookie_file and os.path.exists(self.cookie_file))
@@ -2258,12 +2290,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, '提示', '上一次嗅探仍在结束，请稍后再试。')
                 return
             self.clear_format_state()
-            
-            # 更改按钮文本和状态
-            self.download_button.setText('正在嗅探中')
-            self.download_button.setEnabled(False)  # 设置按钮为不可用状态
-            self.is_sniffing = True
-            self.progress_text.setText('正在嗅探可下载的视频、音频和字幕...')
+            self.set_transfer_state('sniffing')
             
             # 启动嗅探线程
             self.sniff_thread = SniffThread(url, self)
@@ -2285,12 +2312,7 @@ class MainWindow(QMainWindow):
         direct_payload = self.get_direct_download_payload(format_id)
         format_metadata = self.get_format_metadata(format_id)
         if format_needs_ffmpeg(format_id, format_metadata, direct_payload) and not self.has_ffmpeg():
-            if format_metadata.get('kind') == 'playlist':
-                QMessageBox.warning(self, '错误', '列表下载需要 FFmpeg 合并音视频。请把 ffmpeg.exe 放到程序根目录，或安装 FFmpeg 并加入 PATH。')
-                self.progress_text.setText('缺少 FFmpeg，无法下载 YouTube 列表')
-            else:
-                QMessageBox.warning(self, '错误', '未找到 FFmpeg。请把 ffmpeg.exe 放到程序根目录，或安装 FFmpeg 并加入 PATH。')
-                self.progress_text.setText('缺少 FFmpeg，无法合并视频和音频')
+            self.show_missing_ffmpeg_warning(format_metadata)
             return
         
         # 停止当前下载线程（如果有）
@@ -2298,10 +2320,8 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, '提示', '上一次下载仍在结束，请稍后再试。')
             return
 
-        self.download_button.setText('正在下载中')
-        self.download_button.setEnabled(False)  # 设置按钮为不可用状态
+        self.set_transfer_state('downloading')
         self.download_thread = DownloadThread(url, format_id, self)
-        self.progress_text.setText('正在下载中...')
         self.download_thread.progress_signal.connect(self.update_progress)
         self.download_thread.finished_signal.connect(self.download_finished)
         self.download_thread.start()
@@ -2322,10 +2342,8 @@ class MainWindow(QMainWindow):
             return
         if self.pending_url_change:
             return
-        self.is_sniffing = False
         self.sniff_thread = None
-        self.download_button.setText('开始嗅探')
-        self.download_button.setEnabled(True)  # 恢复按钮为可用状态
+        self.set_transfer_state('sniff_ready')
         cookie_warning_message = getattr(sender_thread, 'cookie_warning_message', '')
         direct_download_payloads = getattr(sender_thread, 'direct_download_payloads', {})
         
@@ -2344,8 +2362,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, '提示', cookie_warning_message)
         else:
             # 嗅探失败时重置状态
-            self.download_button.setText('开始嗅探')
-            self.progress_text.setText(message if self.is_cancel_message(message) else '准备就绪')
+            self.set_transfer_state('sniff_ready', message if self.is_cancel_message(message) else '准备就绪')
             self.clear_format_state()
             
             if cookie_mode == 'show_cookie_input':
@@ -2355,15 +2372,7 @@ class MainWindow(QMainWindow):
             elif self.is_cancel_message(message):
                 return
             elif not success:
-                retry_box = QMessageBox(self)
-                retry_box.setWindowTitle('错误')
-                retry_box.setText(message)
-                retry_box.setIcon(QMessageBox.Icon.Warning)
-                retry_button = retry_box.addButton('再试一次', QMessageBox.ButtonRole.AcceptRole)
-                retry_box.addButton('取消', QMessageBox.ButtonRole.RejectRole)
-                retry_box.exec()
-                if retry_box.clickedButton() is retry_button:
-                    QTimer.singleShot(0, self.start_download)
+                self.show_retry_dialog(message, self.start_download)
             elif not formats:
                 QMessageBox.warning(self, '警告', '未找到可下载的视频格式或字幕')
 
@@ -2374,24 +2383,13 @@ class MainWindow(QMainWindow):
         if self.pending_url_change:
             return
         self.download_thread = None
-        self.download_button.setEnabled(True)  # 恢复按钮为可用状态
-        self.is_sniffing = False
-        self.progress_text.setText(message)
-        self.download_button.setText('开始下载')  # 无论成功失败都显示"开始下载"
+        self.set_transfer_state('download_ready', message)
         if success:
             QMessageBox.information(self, '成功', message)
         elif self.is_cancel_message(message):
             return
         else:
-            retry_box = QMessageBox(self)
-            retry_box.setWindowTitle('错误')
-            retry_box.setText(message)
-            retry_box.setIcon(QMessageBox.Icon.Warning)
-            retry_button = retry_box.addButton('再试一次', QMessageBox.ButtonRole.AcceptRole)
-            retry_box.addButton('取消', QMessageBox.ButtonRole.RejectRole)
-            retry_box.exec()
-            if retry_box.clickedButton() is retry_button:
-                QTimer.singleShot(0, self.start_download)
+            self.show_retry_dialog(message, self.start_download)
 
     def on_url_text_changed(self):
         self.cookie_container.hide()
@@ -2399,8 +2397,7 @@ class MainWindow(QMainWindow):
         self.reset_url_dependent_state(set_ready_text=not self.has_active_transfer())
         if self.has_active_transfer():
             self.progress_text.setText('链接已变更，正在停止当前任务...')
-        self.download_button.setEnabled(True)
-        self.is_sniffing = False
+        self.set_transfer_state('sniff_ready')
         self.url_change_timer.start(250)
 
     def save_cookie(self):
@@ -2511,8 +2508,6 @@ class MainWindow(QMainWindow):
             self.stop_worker_thread(download_thread, 1000)
 
         self.reset_url_dependent_state(set_ready_text=True)
-        self.download_button.setEnabled(True)
-        self.is_sniffing = False
 
 def main():
     try:
