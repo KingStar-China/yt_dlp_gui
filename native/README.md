@@ -1,6 +1,6 @@
 # YtDlpGui.Native
 
-`YtDlpGui.Native` 是现有 PyQt6 版本的 Windows 原生旁路重构。当前为 `2.0.0-beta.1`，不会覆盖根目录中的 Python 稳定版。
+`YtDlpGui.Native` 是现有 PyQt6 版本的 Windows 原生旁路重构。当前为 `2.0.0-beta.2`，不会覆盖根目录中的 Python 稳定版。
 
 ## 工程结构
 
@@ -21,6 +21,7 @@ tests/
 - B站常规嗅探失败后的网页/API 直连回退与 FFmpeg 合并。
 - 完整进程树取消，不在后台遗留 yt-dlp 或 FFmpeg。
 - 首次启动默认下载到主程序同级的 `Downloads`，并自动创建该目录；用户另选目录后保存到 `%LOCALAPPDATA%\YtDlpGui\settings.json`。
+- 支持深色、浅色和跟随 Windows 系统三种主题，通知与目录选择弹窗同步使用当前主题。
 - 手动 Cookie 仅写入临时文件，按当前网站隔离，退出时删除。
 - 从 GitHub 官方 latest 地址下载并校验 yt-dlp 更新。
 

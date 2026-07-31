@@ -1,15 +1,20 @@
 using System.Diagnostics;
 using System.IO;
-using System.Runtime.InteropServices;
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Interop;
-using Microsoft.Win32;
+using YtDlpGui.Core;
 
 namespace YtDlpGui.App;
 
 public partial class MainWindow : Window
 {
+    private const int WmSettingChange = 0x001A;
+    private const int WmThemeChanged = 0x031A;
+
     private readonly MainViewModel _viewModel;
+    private HwndSource? _windowSource;
+    private bool _isInitialized;
 
     public MainWindow()
     {
@@ -17,14 +22,16 @@ public partial class MainWindow : Window
         InitializeComponent();
         DataContext = _viewModel;
         Loaded += OnLoaded;
-        SourceInitialized += (_, _) => EnableDarkTitleBar();
-        Closing += (_, _) => _viewModel.Dispose();
+        SourceInitialized += OnSourceInitialized;
+        Closing += OnClosing;
         _viewModel.NotificationRequested += ShowNotification;
     }
 
     private async void OnLoaded(object sender, RoutedEventArgs e)
     {
         await _viewModel.InitializeAsync();
+        ThemeManager.Apply(_viewModel.Theme);
+        _isInitialized = true;
         UrlTextBox.Focus();
     }
 
@@ -39,20 +46,30 @@ public partial class MainWindow : Window
     private async void SaveCookie_Click(object sender, RoutedEventArgs e) =>
         await _viewModel.SaveManualCookieAsync();
 
+    private async void ThemeComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!_isInitialized || ThemeComboBox.SelectedValue is not AppTheme theme)
+        {
+            return;
+        }
+
+        ThemeManager.Apply(theme);
+        await _viewModel.SetThemeAsync(theme);
+    }
+
     private async void ChooseOutputDirectory_Click(object sender, RoutedEventArgs e)
     {
-        var dialog = new OpenFolderDialog
+        var initialDirectory = Directory.Exists(_viewModel.OutputDirectory)
+            ? _viewModel.OutputDirectory
+            : Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        var dialog = new ThemedFolderDialog(initialDirectory)
         {
-            Title = "选择视频输出目录",
-            InitialDirectory = Directory.Exists(_viewModel.OutputDirectory)
-                ? _viewModel.OutputDirectory
-                : Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-            Multiselect = false,
+            Owner = this,
         };
 
-        if (dialog.ShowDialog(this) == true)
+        if (dialog.ShowDialog() == true && dialog.SelectedDirectory is not null)
         {
-            await _viewModel.SetOutputDirectoryAsync(dialog.FolderName);
+            await _viewModel.SetOutputDirectoryAsync(dialog.SelectedDirectory);
         }
     }
 
@@ -71,26 +88,39 @@ public partial class MainWindow : Window
 
     private void ShowNotification(NotificationRequest notification)
     {
-        MessageBox.Show(
+        ThemedMessageDialog.Show(
             this,
-            notification.Message,
             notification.Title,
-            MessageBoxButton.OK,
-            notification.IsSuccess ? MessageBoxImage.Information : MessageBoxImage.Warning);
+            notification.Message,
+            notification.IsSuccess);
     }
 
-    private void EnableDarkTitleBar()
+    private void OnSourceInitialized(object? sender, EventArgs e)
     {
-        if (!OperatingSystem.IsWindows())
+        ThemeManager.ApplyWindowChrome(this);
+        _windowSource = PresentationSource.FromVisual(this) as HwndSource;
+        _windowSource?.AddHook(WindowMessageHook);
+    }
+
+    private void OnClosing(object? sender, System.ComponentModel.CancelEventArgs e)
+    {
+        _windowSource?.RemoveHook(WindowMessageHook);
+        _viewModel.NotificationRequested -= ShowNotification;
+        _viewModel.Dispose();
+    }
+
+    private IntPtr WindowMessageHook(
+        IntPtr windowHandle,
+        int message,
+        IntPtr wordParameter,
+        IntPtr longParameter,
+        ref bool handled)
+    {
+        if (message is WmSettingChange or WmThemeChanged)
         {
-            return;
+            Dispatcher.BeginInvoke(ThemeManager.RefreshSystemTheme);
         }
 
-        var handle = new WindowInteropHelper(this).Handle;
-        var enabled = 1;
-        _ = DwmSetWindowAttribute(handle, 20, ref enabled, sizeof(int));
+        return IntPtr.Zero;
     }
-
-    [DllImport("dwmapi.dll")]
-    private static extern int DwmSetWindowAttribute(IntPtr windowHandle, int attribute, ref int value, int size);
 }

@@ -33,6 +33,13 @@ public enum TransferState
     Updating,
 }
 
+public enum AppTheme
+{
+    System,
+    Light,
+    Dark,
+}
+
 public sealed record MediaFormat(
     string Id,
     string Label,
@@ -91,4 +98,6 @@ public sealed record ToolPaths(string YtDlpPath, string? FfmpegPath)
     public bool HasFfmpeg => !string.IsNullOrWhiteSpace(FfmpegPath) && File.Exists(FfmpegPath);
 }
 
-public sealed record AppSettings(string OutputDirectory = "");
+public sealed record AppSettings(
+    string OutputDirectory = "",
+    AppTheme Theme = AppTheme.System);

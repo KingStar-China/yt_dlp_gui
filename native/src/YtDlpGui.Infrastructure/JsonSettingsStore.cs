@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using YtDlpGui.Core;
 
 namespace YtDlpGui.Infrastructure;
@@ -9,6 +10,7 @@ public sealed class JsonSettingsStore : ISettingsStore
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         WriteIndented = true,
+        Converters = { new JsonStringEnumConverter() },
     };
 
     private readonly string _applicationDirectory;
@@ -36,7 +38,10 @@ public sealed class JsonSettingsStore : ISettingsStore
             var settings = await JsonSerializer.DeserializeAsync<AppSettings>(stream, JsonOptions, cancellationToken).ConfigureAwait(false);
             if (settings is not null && Directory.Exists(settings.OutputDirectory))
             {
-                return settings;
+                return settings with
+                {
+                    Theme = Enum.IsDefined(settings.Theme) ? settings.Theme : AppTheme.System,
+                };
             }
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException)

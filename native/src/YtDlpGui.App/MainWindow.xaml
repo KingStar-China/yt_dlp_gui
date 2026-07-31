@@ -4,15 +4,15 @@
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         mc:Ignorable="d"
-        Title="yt_dlp_gui Native v2.0.0 Beta"
+        Title="yt_dlp_gui Native v2.0.0 Beta 2"
         Icon="Assets/app.ico"
         Width="820"
         Height="650"
         MinWidth="680"
         MinHeight="560"
         WindowStartupLocation="CenterScreen"
-        Background="{StaticResource WindowBrush}"
-        Foreground="{StaticResource TextBrush}">
+        Background="{DynamicResource WindowBrush}"
+        Foreground="{DynamicResource TextBrush}">
     <Grid>
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
@@ -20,25 +20,41 @@
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
-        <Border Grid.Row="0" Padding="24,20,24,16" BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1">
+        <Border Grid.Row="0" Padding="24,20,24,16" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,0,1">
             <Grid>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*" />
                     <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
                 <StackPanel>
                     <TextBlock FontSize="24" FontWeight="SemiBold" Text="视频下载器" />
-                    <TextBlock Margin="0,4,0,0" Foreground="{StaticResource MutedTextBrush}" Text="Windows 原生 Beta · yt-dlp + FFmpeg" />
+                    <TextBlock Margin="0,4,0,0" Foreground="{DynamicResource MutedTextBrush}" Text="Windows 原生 Beta · yt-dlp + FFmpeg" />
                 </StackPanel>
-                <Border Grid.Column="1" Padding="11,6" VerticalAlignment="Center" Background="#26333A" CornerRadius="14">
-                    <TextBlock FontSize="12" Foreground="{StaticResource AccentBrush}" Text="{Binding StateLabel}" />
+                <ComboBox x:Name="ThemeComboBox"
+                          Grid.Column="1"
+                          Width="118"
+                          Margin="16,0,12,0"
+                          VerticalAlignment="Center"
+                          ItemsSource="{Binding ThemeOptions}"
+                          SelectedValuePath="Value"
+                          SelectedValue="{Binding Theme, Mode=OneWay}"
+                          ToolTip="界面主题"
+                          AutomationProperties.Name="界面主题"
+                          SelectionChanged="ThemeComboBox_SelectionChanged" />
+                <Border Grid.Column="2"
+                        Padding="11,6"
+                        VerticalAlignment="Center"
+                        Background="{DynamicResource StateBadgeBrush}"
+                        CornerRadius="14">
+                    <TextBlock FontSize="12" Foreground="{DynamicResource AccentBrush}" Text="{Binding StateLabel}" />
                 </Border>
             </Grid>
         </Border>
 
         <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
             <StackPanel Margin="24,20,24,18">
-                <Border Padding="18" Background="{StaticResource CardBrush}" CornerRadius="10">
+                <Border Padding="18" Background="{DynamicResource CardBrush}" CornerRadius="10">
                     <StackPanel>
                         <TextBlock Style="{StaticResource SectionLabelStyle}" Text="视频 URL" />
                         <TextBox x:Name="UrlTextBox"
@@ -69,22 +85,22 @@
 
                 <Expander Margin="0,12,0,0"
                           IsExpanded="{Binding IsCookiePanelExpanded}"
-                          Foreground="{StaticResource TextBrush}">
+                          Foreground="{DynamicResource TextBrush}">
                     <Expander.Header>
                         <StackPanel Orientation="Horizontal">
                             <TextBlock FontWeight="SemiBold" Text="手动 Cookie" />
-                            <TextBlock Margin="10,0,0,0" Foreground="{StaticResource MutedTextBrush}" Text="{Binding CookieScopeLabel}" />
+                            <TextBlock Margin="10,0,0,0" Foreground="{DynamicResource MutedTextBrush}" Text="{Binding CookieScopeLabel}" />
                         </StackPanel>
                     </Expander.Header>
-                    <Border Margin="0,8,0,0" Padding="18" Background="{StaticResource CardBrush}" CornerRadius="10">
+                    <Border Margin="0,8,0,0" Padding="18" Background="{DynamicResource CardBrush}" CornerRadius="10">
                         <StackPanel>
                             <CheckBox Margin="0,0,0,10"
-                                      Foreground="{StaticResource TextBrush}"
+                                      Foreground="{DynamicResource TextBrush}"
                                       Content="匿名嗅探失败后，尝试 Firefox、Edge、Chrome 登录态"
                                       IsChecked="{Binding TryBrowserCookies}"
                                       IsEnabled="{Binding IsNotBusy}" />
                             <TextBlock Margin="0,0,0,8"
-                                       Foreground="{StaticResource MutedTextBrush}"
+                                       Foreground="{DynamicResource MutedTextBrush}"
                                        TextWrapping="Wrap"
                                        Text="粘贴 Netscape 格式 Cookie。内容只写入临时文件，关闭程序即删除，并且只对当前网站生效。" />
                             <TextBox Height="104"
@@ -130,7 +146,11 @@
             </StackPanel>
         </ScrollViewer>
 
-        <Border Grid.Row="2" Padding="24,14" Background="#191C21" BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,1,0,0">
+        <Border Grid.Row="2"
+                Padding="24,14"
+                Background="{DynamicResource FooterBrush}"
+                BorderBrush="{DynamicResource BorderBrush}"
+                BorderThickness="0,1,0,0">
             <Grid>
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto" />
@@ -141,13 +161,13 @@
                              Height="3"
                              Margin="0,0,0,10"
                              IsIndeterminate="True"
-                             Foreground="{StaticResource AccentBrush}"
+                             Foreground="{DynamicResource AccentBrush}"
                              Visibility="{Binding IsBusy, Converter={StaticResource BooleanToVisibilityConverter}}" />
                 <TextBlock Grid.Row="1" Text="{Binding StatusText}" TextWrapping="Wrap" />
                 <TextBlock Grid.Row="2"
                            Margin="0,5,0,0"
                            FontSize="11"
-                           Foreground="{StaticResource MutedTextBrush}"
+                           Foreground="{DynamicResource MutedTextBrush}"
                            Text="{Binding ToolSummary}"
                            TextTrimming="CharacterEllipsis" />
             </Grid>

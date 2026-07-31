@@ -9,10 +9,16 @@ namespace YtDlpGui.App;
 
 public sealed record NotificationRequest(string Title, string Message, bool IsSuccess);
 
+public sealed record ThemeOption(AppTheme Value, string Label)
+{
+    public override string ToString() => Label;
+}
+
 public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 {
     private readonly IYtDlpService _ytDlpService;
     private readonly ISettingsStore _settingsStore;
+    private readonly SemaphoreSlim _settingsSaveLock = new(1, 1);
     private readonly TransferStateMachine _stateMachine = new();
     private CancellationTokenSource? _operationCancellation;
     private string _url = string.Empty;
@@ -27,6 +33,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     private MediaFormat? _selectedFormat;
     private bool _isCookiePanelExpanded;
     private bool _tryBrowserCookies;
+    private AppTheme _theme = AppTheme.System;
     private bool _disposed;
 
     public MainViewModel(IYtDlpService? ytDlpService = null, ISettingsStore? settingsStore = null)
@@ -40,6 +47,13 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     public event Action<NotificationRequest>? NotificationRequested;
 
     public ObservableCollection<MediaFormat> Formats { get; } = [];
+
+    public IReadOnlyList<ThemeOption> ThemeOptions { get; } =
+    [
+        new(AppTheme.Dark, "深色"),
+        new(AppTheme.Light, "浅色"),
+        new(AppTheme.System, "跟随系统"),
+    ];
 
     public string Url
     {
@@ -70,6 +84,12 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     {
         get => _outputDirectory;
         private set => SetField(ref _outputDirectory, value);
+    }
+
+    public AppTheme Theme
+    {
+        get => _theme;
+        private set => SetField(ref _theme, value);
     }
 
     public string CookieText
@@ -166,6 +186,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     {
         var settings = await _settingsStore.LoadAsync();
         OutputDirectory = settings.OutputDirectory;
+        Theme = settings.Theme;
         var version = await _ytDlpService.GetYtDlpVersionAsync();
         UpdateToolSummary(version);
         StatusText = version is null
@@ -251,12 +272,32 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         OutputDirectory = outputDirectory;
         try
         {
-            await _settingsStore.SaveAsync(new(outputDirectory));
+            await SaveSettingsAsync();
             StatusText = $"输出目录已更新：{outputDirectory}";
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
             StatusText = $"输出目录已选择，但保存设置失败：{exception.Message}";
+            NotificationRequested?.Invoke(new("设置保存失败", StatusText, false));
+        }
+    }
+
+    public async Task SetThemeAsync(AppTheme theme)
+    {
+        if (!Enum.IsDefined(theme) || Theme == theme)
+        {
+            return;
+        }
+
+        Theme = theme;
+        try
+        {
+            await SaveSettingsAsync();
+            StatusText = $"界面主题已切换为：{ThemeOptions.First(option => option.Value == theme).Label}";
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            StatusText = $"主题已切换，但保存设置失败：{exception.Message}";
             NotificationRequested?.Invoke(new("设置保存失败", StatusText, false));
         }
     }
@@ -479,6 +520,19 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         var ytDlp = version is null ? "未找到" : version;
         var ffmpeg = _ytDlpService.Tools.HasFfmpeg ? "已找到" : "未找到";
         ToolSummary = $"yt-dlp：{ytDlp}    FFmpeg：{ffmpeg}";
+    }
+
+    private async Task SaveSettingsAsync()
+    {
+        await _settingsSaveLock.WaitAsync();
+        try
+        {
+            await _settingsStore.SaveAsync(new(OutputDirectory, Theme));
+        }
+        finally
+        {
+            _settingsSaveLock.Release();
+        }
     }
 
     private void DeleteManualCookieFile()

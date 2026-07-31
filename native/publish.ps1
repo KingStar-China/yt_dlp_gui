@@ -4,6 +4,23 @@ param(
     [switch]$FrameworkDependent
 )
 
+function Get-YtDlpVersion {
+    param([string]$Path)
+
+    try {
+        $versionText = (& $Path --version 2>$null | Select-Object -First 1).Trim()
+        $parsedVersion = [version]'0.0'
+        if ([version]::TryParse($versionText, [ref]$parsedVersion)) {
+            return $parsedVersion
+        }
+    }
+    catch {
+        # An unreadable candidate is treated as older and replaced below.
+    }
+
+    return [version]'0.0'
+}
+
 $nativeRoot = Split-Path -Parent $PSCommandPath
 $repositoryRoot = Split-Path -Parent $nativeRoot
 $projectPath = Join-Path $nativeRoot 'src\YtDlpGui.App\YtDlpGui.App.csproj'
@@ -27,8 +44,18 @@ if ($LASTEXITCODE -ne 0) {
 
 foreach ($toolName in @('yt-dlp.exe', 'ffmpeg.exe')) {
     $sourcePath = Join-Path $repositoryRoot $toolName
+    $destinationPath = Join-Path $outputPath $toolName
     if (Test-Path -LiteralPath $sourcePath) {
-        Copy-Item -LiteralPath $sourcePath -Destination (Join-Path $outputPath $toolName) -Force
+        if ($toolName -eq 'yt-dlp.exe' -and (Test-Path -LiteralPath $destinationPath)) {
+            $sourceVersion = Get-YtDlpVersion $sourcePath
+            $destinationVersion = Get-YtDlpVersion $destinationPath
+            if ($destinationVersion -gt $sourceVersion) {
+                Write-Host "保留已更新的 yt-dlp：$destinationVersion"
+                continue
+            }
+        }
+
+        Copy-Item -LiteralPath $sourcePath -Destination $destinationPath -Force
     }
 }
 
