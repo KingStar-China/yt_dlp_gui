@@ -20,7 +20,7 @@ tests/
 - YouTube 列表批量下载，提供 H.264 优先和最佳兼容模式。
 - B站常规嗅探失败后的网页/API 直连回退与 FFmpeg 合并。
 - 完整进程树取消，不在后台遗留 yt-dlp 或 FFmpeg。
-- `%LOCALAPPDATA%\YtDlpGui\settings.json` 用户级输出目录设置。
+- 首次启动默认下载到主程序同级的 `Downloads`，并自动创建该目录；用户另选目录后保存到 `%LOCALAPPDATA%\YtDlpGui\settings.json`。
 - 手动 Cookie 仅写入临时文件，按当前网站隔离，退出时删除。
 - 从 GitHub 官方 latest 地址下载并校验 yt-dlp 更新。
 

@@ -11,14 +11,16 @@ public sealed class JsonSettingsStore : ISettingsStore
         WriteIndented = true,
     };
 
+    private readonly string _applicationDirectory;
     private readonly string _settingsPath;
 
-    public JsonSettingsStore(string? settingsPath = null)
+    public JsonSettingsStore(string? settingsPath = null, string? applicationDirectory = null)
     {
         _settingsPath = settingsPath ?? Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "YtDlpGui",
             "settings.json");
+        _applicationDirectory = Path.GetFullPath(applicationDirectory ?? AppContext.BaseDirectory);
     }
 
     public async Task<AppSettings> LoadAsync(CancellationToken cancellationToken = default)
@@ -39,7 +41,7 @@ public sealed class JsonSettingsStore : ISettingsStore
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException)
         {
-            // Invalid settings fall back to a writable user directory.
+            // Invalid settings fall back to the application-local Downloads directory.
         }
 
         return new(GetDefaultOutputDirectory());
@@ -70,14 +72,37 @@ public sealed class JsonSettingsStore : ISettingsStore
         }
     }
 
-    private static string GetDefaultOutputDirectory()
+    private string GetDefaultOutputDirectory()
     {
-        var downloads = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads");
-        if (Directory.Exists(downloads))
+        var applicationDownloads = Path.Combine(_applicationDirectory, "Downloads");
+        if (TryEnsureWritableDirectory(applicationDownloads))
         {
-            return downloads;
+            return applicationDownloads;
         }
 
-        return Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        var userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        var userDownloads = Path.Combine(userProfile, "Downloads");
+        return TryEnsureWritableDirectory(userDownloads) ? userDownloads : userProfile;
+    }
+
+    private static bool TryEnsureWritableDirectory(string directory)
+    {
+        try
+        {
+            Directory.CreateDirectory(directory);
+            var probePath = Path.Combine(directory, $".ytdlp-gui-{Guid.NewGuid():N}.tmp");
+            using var probe = new FileStream(
+                probePath,
+                FileMode.CreateNew,
+                FileAccess.Write,
+                FileShare.None,
+                bufferSize: 1,
+                FileOptions.DeleteOnClose);
+            return true;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
     }
 }
