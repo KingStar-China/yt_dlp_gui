@@ -59,4 +59,18 @@ foreach ($toolName in @('yt-dlp.exe', 'ffmpeg.exe')) {
     }
 }
 
+$licenseOutputPath = Join-Path $outputPath 'licenses'
+New-Item -ItemType Directory -Force -Path $licenseOutputPath | Out-Null
+
+Copy-Item -LiteralPath (Join-Path $repositoryRoot 'LICENSE') `
+    -Destination (Join-Path $outputPath 'LICENSE') -Force
+Copy-Item -LiteralPath (Join-Path $repositoryRoot 'THIRD-PARTY-NOTICES.md') `
+    -Destination (Join-Path $outputPath 'THIRD-PARTY-NOTICES.md') -Force
+Copy-Item -LiteralPath (Join-Path $nativeRoot 'README.md') `
+    -Destination (Join-Path $outputPath 'README.md') -Force
+Copy-Item -LiteralPath (Join-Path $nativeRoot 'FFMPEG_SOURCE_INFO.md') `
+    -Destination (Join-Path $outputPath 'FFMPEG_SOURCE_INFO.md') -Force
+Copy-Item -Path (Join-Path $nativeRoot 'licenses\*') `
+    -Destination $licenseOutputPath -Force
+
 Write-Host "发布完成：$outputPath"

@@ -1,6 +1,6 @@
 # YtDlpGui.Native
 
-`YtDlpGui.Native` 是现有 PyQt6 版本的 Windows 原生旁路重构。当前为 `2.0.0-beta.2`，不会覆盖根目录中的 Python 稳定版。
+`YtDlpGui.Native` 是 `yt_dlp_gui` 的 Windows 原生正式版。当前版本为 `2.0.0`，使用 C#、.NET 10 与 WPF 重构。
 
 ## 工程结构
 
@@ -51,3 +51,11 @@ dotnet run --project .\native\src\YtDlpGui.App\YtDlpGui.App.csproj
 ```
 
 FFmpeg 仍然是发布包体积的主要部分；原生重构的主要收益是 Windows 集成、启动体验、状态可靠性和可维护性，而不是下载速度。
+
+发布脚本还会把项目许可证、第三方软件声明、FFmpeg 源码说明和相应许可证复制到输出目录。正式版下载见 [v2.0.0 Release](https://github.com/KingStar-China/yt_dlp_gui/releases/tag/v2.0.0)。
+
+## 安全与许可证
+
+- 本项目按 [MIT License](../LICENSE) 发布。
+- 随包 `yt-dlp.exe` 与 `ffmpeg.exe` 是独立第三方程序，详细版本、哈希、许可证与源码位置见 [THIRD-PARTY-NOTICES.md](../THIRD-PARTY-NOTICES.md)。
+- 当前正式包未做代码签名，Windows SmartScreen 可能弹出警告。请只从本仓库 Release 下载并核对 `SHA256SUMS.txt`。

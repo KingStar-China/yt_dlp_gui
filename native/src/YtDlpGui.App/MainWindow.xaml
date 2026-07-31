@@ -4,7 +4,7 @@
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         mc:Ignorable="d"
-        Title="yt_dlp_gui Native v2.0.0 Beta 2"
+        Title="yt_dlp_gui Native v2.0.0"
         Icon="Assets/app.ico"
         Width="820"
         Height="650"
@@ -29,7 +29,7 @@
                 </Grid.ColumnDefinitions>
                 <StackPanel>
                     <TextBlock FontSize="24" FontWeight="SemiBold" Text="视频下载器" />
-                    <TextBlock Margin="0,4,0,0" Foreground="{DynamicResource MutedTextBrush}" Text="Windows 原生 Beta · yt-dlp + FFmpeg" />
+                    <TextBlock Margin="0,4,0,0" Foreground="{DynamicResource MutedTextBrush}" Text="Windows 原生版 · yt-dlp + FFmpeg" />
                 </StackPanel>
                 <ComboBox x:Name="ThemeComboBox"
                           Grid.Column="1"
