@@ -1,0 +1,25 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\YtDlpGui.Core\YtDlpGui.Core.csproj" />
+    <ProjectReference Include="..\YtDlpGui.Infrastructure\YtDlpGui.Infrastructure.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <AssemblyName>YtDlpGui.Native</AssemblyName>
+    <Version>2.0.0-beta.1</Version>
+    <FileVersion>2.0.0.0</FileVersion>
+    <ApplicationIcon>..\..\..\logo\app.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Resource Include="..\..\..\logo\app.ico" Link="Assets\app.ico" />
+  </ItemGroup>
+
+</Project>

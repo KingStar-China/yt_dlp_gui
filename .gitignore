@@ -10,3 +10,7 @@ yt-dlp.exe
 /release/
 *.mp3
 ffmpeg.exe
+/native/**/bin/
+/native/**/obj/
+/native/artifacts/
+/native/.vs/
